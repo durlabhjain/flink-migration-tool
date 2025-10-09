@@ -1,0 +1,59 @@
+# Sensitive Data Configuration
+# Filter out PII and sensitive columns
+
+database:
+  server: "secure-sql.example.com"
+  database: "CustomerDB"
+  user: "${SQL_USER}"
+  password: "${SQL_PASSWORD}"
+  encrypt: true
+
+schema: "dbo"
+jobName: "customer_pii_filtered"
+
+global:
+  tables:
+    include:
+      - "Customers"
+      - "CustomerContacts"
+      - "CustomerAddresses"
+  
+  # Globally exclude sensitive columns
+  columns:
+    exclude:
+      - "SSN"
+      - "TaxId"
+      - "CreditCard"
+      - "Password"
+      - "SecurityAnswer"
+      - "BankAccount"
+      - "^Internal"
+
+# Explicitly define allowed columns for sensitive tables
+tableOverrides:
+  - table: "Customers"
+    includeColumns:
+      - "CustomerId"
+      - "FirstName"
+      - "LastName"
+      - "Email"
+      - "Phone"
+      - "CreatedDate"
+      - "Status"
+    primaryKey:
+      - "CustomerId"
+  
+  - table: "CustomerContacts"
+    includeColumns:
+      - "ContactId"
+      - "CustomerId"
+      - "ContactType"
+      - "ContactValue"
+      - "IsPrimary"
+    primaryKey:
+      - "ContactId"
+
+output:
+  flinkPath: "./output/flink"
+  starRocksPath: "./output/starrocks"
+  checksumPath: "./output/checksums"

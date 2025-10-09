@@ -1,0 +1,62 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Build output
+dist/
+*.js
+*.js.map
+*.d.ts
+!src/**/*.ts
+
+# TypeScript
+*.tsbuildinfo
+
+# Output directories
+output/**/*
+!output/**/.gitkeep
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Credentials (never commit these!)
+**/config.yaml
+**/config.yml
+**/*_prod.yaml
+**/*_production.yaml
+configs/*_prod.yaml
+configs/*_production.yaml
+
+# Allow example configs
+!configs/examples/**/*.yaml
+!configs/examples/**/*.yml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+Thumbs.db
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

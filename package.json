@@ -1,0 +1,50 @@
+{
+  "name": "sqlserver-flink-migration-tool",
+  "version": "1.0.0",
+  "description": "Generate Flink CDC and StarRocks DDL from SQL Server schemas with pattern-based auto-discovery",
+  "main": "dist/index.js",
+  "bin": {
+    "sql2flink": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "ts-node src/index.ts",
+    "generate": "ts-node src/index.ts generate",
+    "generate-all": "ts-node src/index.ts generate-all",
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "flink",
+    "starrocks",
+    "sql-server",
+    "cdc",
+    "migration",
+    "etl",
+    "data-warehouse",
+    "schema-migration"
+  ],
+  "author": "Durlabh Jain",
+  "license": "MIT",
+  "dependencies": {
+    "mssql": "^10.0.1",
+    "js-yaml": "^4.1.0",
+    "commander": "^11.1.0",
+    "glob": "^10.3.10"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/mssql": "^9.1.4",
+    "@types/js-yaml": "^4.0.9",
+    "typescript": "^5.3.3",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/durlabhjain/flink-migration-tool.git"
+  }
+}

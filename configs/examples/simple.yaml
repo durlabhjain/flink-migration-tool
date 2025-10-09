@@ -1,0 +1,34 @@
+# Simple Configuration Example
+# This is the minimal config needed to get started
+
+database:
+  server: "localhost"
+  database: "MyDatabase"
+  user: "sa"
+  password: "YourPassword123"
+  port: 1433
+  encrypt: false  # Set to true for Azure SQL or production
+
+# Schema to process
+schema: "dbo"
+
+# Optional: Give your job a name (defaults to schema name)
+# jobName: "dbo_full_sync"
+
+# Optional: Filter tables and columns
+# If omitted, all tables in the schema are included
+global:
+  tables:
+    exclude:
+      - "^tmp_"         # Exclude temporary tables
+      - "sysdiagrams"   # Exclude SQL Server diagrams
+  
+  columns:
+    exclude:
+      - "RowVersion"    # Exclude row version columns
+      - "ssma_timestamp" # Exclude SSMA columns
+
+output:
+  flinkPath: "./output/flink"
+  starRocksPath: "./output/starrocks"
+  checksumPath: "./output/checksums"

@@ -1,0 +1,30 @@
+# Multi-Job Example: Orders Pipeline
+# Split large schemas into multiple jobs for better organization
+
+database:
+  server: "${SQL_SERVER}"
+  database: "SalesDB"
+  user: "${SQL_USER}"
+  password: "${SQL_PASSWORD}"
+  encrypt: true
+
+schema: "sales"
+jobName: "sales_orders_pipeline"  # Unique job name
+
+# Only include Order-related tables
+global:
+  tables:
+    include:
+      - "^Order"          # Orders, OrderDetails, OrderPayments, etc.
+    exclude:
+      - ".*_Archive$"
+  
+  columns:
+    exclude:
+      - "^Internal"
+      - "RowVersion"
+
+output:
+  flinkPath: "./output/flink"
+  starRocksPath: "./output/starrocks"
+  checksumPath: "./output/checksums"

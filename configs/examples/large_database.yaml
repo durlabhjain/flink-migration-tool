@@ -1,0 +1,53 @@
+# Large Database Configuration (200+ tables)
+# Use pattern matching to manage many tables efficiently
+
+database:
+  server: "warehouse-sql.example.com"
+  database: "WarehouseDB"
+  user: "${SQL_USER}"           # Use environment variables
+  password: "${SQL_PASSWORD}"
+  port: 1433
+  encrypt: true
+
+schema: "inventory"
+jobName: "inventory_master_data"
+
+# Auto-discover all tables with broad patterns
+global:
+  tables:
+    include:
+      - ".*"              # Include all tables
+    exclude:
+      # Exclude patterns
+      - "^tmp"            # Temp tables
+      - "^bak_"           # Backup tables
+      - ".*_Archive$"     # Archive tables
+      - ".*_History$"     # History tables
+      - ".*_Staging$"     # Staging tables
+      - "^test"           # Test tables
+      - "sysdiagrams"     # System tables
+  
+  columns:
+    exclude:
+      - "^Internal"       # Internal use columns
+      - "^System"         # System columns
+      - "^_"              # Underscore-prefixed columns
+      - "ssma_timestamp"  # SSMA migration columns
+      - "RowVersion"      # SQL Server row version
+
+# Override specific tables if needed
+tableOverrides:
+  - table: "ProductInventory"
+    primaryKey:
+      - "ProductId"
+      - "LocationId"
+  
+  - table: "InventoryTransactions"
+    excludeColumns:
+      - "DebugInfo"
+      - "ProcessingMetadata"
+
+output:
+  flinkPath: "./output/flink"
+  starRocksPath: "./output/starrocks"
+  checksumPath: "./output/checksums"

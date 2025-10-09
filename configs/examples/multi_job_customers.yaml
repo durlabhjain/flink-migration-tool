@@ -1,0 +1,30 @@
+# Multi-Job Example: Customers Pipeline
+# Companion to multi_job_orders.yaml
+
+database:
+  server: "${SQL_SERVER}"
+  database: "SalesDB"
+  user: "${SQL_USER}"
+  password: "${SQL_PASSWORD}"
+  encrypt: true
+
+schema: "sales"
+jobName: "sales_customers_pipeline"  # Different job name, same schema
+
+# Only include Customer-related tables
+global:
+  tables:
+    include:
+      - "^Customer"       # Customers, CustomerAddresses, CustomerContacts, etc.
+    exclude:
+      - ".*_Archive$"
+  
+  columns:
+    exclude:
+      - "^Internal"
+      - "RowVersion"
+
+output:
+  flinkPath: "./output/flink"
+  starRocksPath: "./output/starrocks"
+  checksumPath: "./output/checksums"
