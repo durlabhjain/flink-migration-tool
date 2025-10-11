@@ -424,99 +424,66 @@ ${columnDefs.join(',\n')}${pk}
 -- Flink Job Configuration for ${jobName}
 -- =============================================================================
 -- 
--- IMPORTANT: Add these configurations to your Flink job submission
--- 
--- For flink run command:
---   flink run \\
---     -Dexecution.checkpointing.interval=60s \\
---     -Dexecution.checkpointing.mode=EXACTLY_ONCE \\
---     -Dstate.backend=rocksdb \\
---     -Dstate.backend.incremental=true \\
---     -Dstate.checkpoints.dir=hdfs:///flink/checkpoints \\
---     -Dstate.savepoints.dir=hdfs:///flink/savepoints \\
---     -Drestart-strategy=fixed-delay \\
---     -Drestart-strategy.fixed-delay.attempts=3 \\
---     -Drestart-strategy.fixed-delay.delay=10s \\
---     your-job.jar
+-- NOTE: Your cluster already has checkpoint configuration in flink-conf.yaml:
+--   - Checkpoint Interval: 30s
+--   - Mode: EXACTLY_ONCE
+--   - State Backend: RocksDB
+--   - Storage: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/
 --
--- For SQL Client (sql-client-defaults.yaml):
---
--- execution:
---   checkpointing:
---     mode: EXACTLY_ONCE
---     interval: 60s
---     timeout: 10min
---     min-pause: 30s
---     max-concurrent: 1
---     externalized-enabled: true
---     externalized-delete-on-cancellation: false
---   restart-strategy:
---     type: fixed-delay
---     attempts: 3
---     delay: 10s
---
--- state:
---   backend: rocksdb
---   backend.incremental: true
---   checkpoints.dir: hdfs:///flink/checkpoints/${jobName}
---   savepoints.dir: hdfs:///flink/savepoints/${jobName}
+-- The settings below are OPTIONAL job-specific overrides.
+-- Comment out or remove settings you want to inherit from cluster config.
 --
 -- =============================================================================
--- SQL Configuration (Execute these before creating tables)
--- =============================================================================
 
--- Set checkpoint interval (every 60 seconds)
-SET 'execution.checkpointing.interval' = '60s';
+-- ===== OPTIONAL: Job-Specific Storage Paths =====
+-- Organize checkpoints and savepoints by job name
+-- Uncomment to override cluster defaults:
 
--- Set checkpointing mode to exactly-once
-SET 'execution.checkpointing.mode' = 'EXACTLY_ONCE';
+-- SET 'state.checkpoints.dir' = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints/${jobName}';
+-- SET 'state.savepoints.dir' = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}';
 
--- Checkpoint timeout (10 minutes)
-SET 'execution.checkpointing.timeout' = '10min';
+-- ===== OPTIONAL: Job-Specific Checkpoint Interval =====
+-- Cluster default is 30s. Uncomment to override for this job:
+-- SET 'execution.checkpointing.interval' = '60s';  -- Less frequent for low-volume jobs
+-- SET 'execution.checkpointing.interval' = '15s';  -- More frequent for critical jobs
 
--- Minimum pause between checkpoints (30 seconds)
-SET 'execution.checkpointing.min-pause' = '30s';
+-- ===== OPTIONAL: Checkpoint Timeout =====
+-- Uncomment if this job needs more time to complete checkpoints:
+-- SET 'execution.checkpointing.timeout' = '10min';
 
--- Maximum concurrent checkpoints
-SET 'execution.checkpointing.max-concurrent-checkpoints' = '1';
+-- ===== OPTIONAL: Min Pause Between Checkpoints =====
+-- Uncomment to prevent checkpoint storms for this job:
+-- SET 'execution.checkpointing.min-pause' = '30s';
 
--- Enable externalized checkpoints (survive job cancellation)
-SET 'execution.checkpointing.externalized-checkpoint-retention' = 'RETAIN_ON_CANCELLATION';
-
--- State backend configuration
-SET 'state.backend' = 'rocksdb';
-SET 'state.backend.incremental' = 'true';
-
--- Checkpoint storage (CHANGE THESE PATHS!)
-SET 'state.checkpoints.dir' = 'hdfs:///flink/checkpoints/${jobName}';
-SET 'state.savepoints.dir' = 'hdfs:///flink/savepoints/${jobName}';
--- Or for local development:
--- SET 'state.checkpoints.dir' = 'file:///tmp/flink/checkpoints/${jobName}';
--- SET 'state.savepoints.dir' = 'file:///tmp/flink/savepoints/${jobName}';
-
--- Restart strategy
-SET 'restart-strategy' = 'fixed-delay';
-SET 'restart-strategy.fixed-delay.attempts' = '3';
-SET 'restart-strategy.fixed-delay.delay' = '10s';
-
--- CDC source configuration
+-- ===== CDC Source Configuration =====
+-- These settings are recommended for all CDC jobs
 SET 'table.exec.source.idle-timeout' = '30s';
+
+-- ===== OPTIONAL: RocksDB Tuning for This Job =====
+-- Cluster default: managed memory, 256MB block cache
+-- Uncomment to override for jobs with different state characteristics:
+-- SET 'state.backend.rocksdb.block.cache-size' = '512mb';  -- Larger cache for read-heavy jobs
+-- SET 'state.backend.rocksdb.writebuffer.size' = '128mb';  -- Tune write buffer
 
 -- =============================================================================
 -- Resume from Checkpoint/Savepoint
 -- =============================================================================
 --
--- To resume from the latest checkpoint automatically:
---   Job will resume from last completed checkpoint if available
+-- Your cluster automatically resumes from latest checkpoint on restart.
+-- Checkpoints are stored in: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints
 --
--- To resume from a specific savepoint:
---   flink run -s hdfs:///flink/savepoints/${jobName}/savepoint-123456 your-job.jar
+-- To list checkpoints for this job:
+--   az storage blob list --account-name coolr0flink0starrocks --container-name flink --prefix checkpoints/${jobName}
 --
 -- To create a savepoint manually:
---   flink savepoint <job-id> hdfs:///flink/savepoints/${jobName}
+--   flink savepoint <job-id>
+--   # Savepoint will be stored in: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}
+--
+-- To resume from a specific savepoint:
+--   flink run -s wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}/savepoint-123456 -d your-job.jar
 --
 -- To list savepoints:
---   hdfs dfs -ls /flink/savepoints/${jobName}
+--   az storage blob list --account-name coolr0flink0starrocks --container-name flink --prefix savepoints/${jobName}
 --
 -- =============================================================================
 
@@ -645,7 +612,8 @@ class MigrationScriptGenerator {
     const allSchemas: Record<string, TableSchema> = {};
     const jobName = this.config.jobName || this.config.schema;
     
-    let flinkScript = `-- Flink CDC Table Definitions for ${this.config.schema}\n`;
+    let flinkScript = this.flinkGenerator.generateJobConfig(jobName);
+    flinkScript += `-- Flink CDC Table Definitions for ${this.config.schema}\n`;
     if (this.config.jobName) {
       flinkScript += `-- Job: ${this.config.jobName}\n`;
     }
