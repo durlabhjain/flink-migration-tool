@@ -212,7 +212,7 @@ class SchemaExtractor {
 
     const query = `
       SELECT 
-        TABLE_SCHEMA as schema,
+        TABLE_SCHEMA as [schema],
         TABLE_NAME as tableName
       FROM INFORMATION_SCHEMA.TABLES
       WHERE TABLE_SCHEMA = @schema
@@ -282,7 +282,7 @@ class SchemaExtractor {
       )
     );
 
-    // Get primary key
+    // Get primary key so removed the ORDER BY c.ORDINAL_POSITION
     const pkQuery = `
       SELECT c.COLUMN_NAME
       FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
@@ -291,7 +291,6 @@ class SchemaExtractor {
       WHERE tc.TABLE_SCHEMA = @schema 
         AND tc.TABLE_NAME = @table 
         AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
-      ORDER BY c.ORDINAL_POSITION
     `;
 
     const pkResult = await this.connection.request()
