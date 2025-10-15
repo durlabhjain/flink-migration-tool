@@ -211,8 +211,8 @@ class SchemaExtractor {
     if (!this.connection) throw new Error('Not connected to database');
 
     const query = `
-      SELECT 
-        TABLE_SCHEMA as schema,
+      SELECT
+        TABLE_SCHEMA as [schema],
         TABLE_NAME as tableName
       FROM INFORMATION_SCHEMA.TABLES
       WHERE TABLE_SCHEMA = @schema
@@ -221,7 +221,7 @@ class SchemaExtractor {
     `;
 
     const result = await this.connection.request()
-      .input('schema', schema)
+      .input('schema', sql.VarChar, schema)
       .query(query);
 
     const allTables: TableMetadata[] = result.recordset.map((row: any) => ({
@@ -260,8 +260,8 @@ class SchemaExtractor {
     `;
 
     const result = await this.connection.request()
-      .input('schema', schema)
-      .input('table', table)
+      .input('schema', sql.VarChar, schema)
+      .input('table', sql.VarChar, table)
       .query(query);
 
     let columns: ColumnInfo[] = result.recordset.map((row: any) => ({
@@ -284,19 +284,21 @@ class SchemaExtractor {
 
     // Get primary key
     const pkQuery = `
-      SELECT c.COLUMN_NAME
+            SELECT c.COLUMN_NAME
       FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-      JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE c 
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE c
         ON tc.CONSTRAINT_NAME = c.CONSTRAINT_NAME
-      WHERE tc.TABLE_SCHEMA = @schema 
-        AND tc.TABLE_NAME = @table 
+        AND tc.TABLE_SCHEMA = c.TABLE_SCHEMA
+        AND tc.TABLE_NAME = c.TABLE_NAME
+      WHERE tc.TABLE_SCHEMA = @schema
+        AND tc.TABLE_NAME = @table
         AND tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
       ORDER BY c.ORDINAL_POSITION
     `;
 
     const pkResult = await this.connection.request()
-      .input('schema', schema)
-      .input('table', table)
+      .input('schema', sql.VarChar, schema)
+      .input('table', sql.VarChar, table)
       .query(pkQuery);
 
     const primaryKey = pkResult.recordset.map((row: any) => row.COLUMN_NAME);
