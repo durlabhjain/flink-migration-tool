@@ -1,17 +1,34 @@
 # SQL Server to Flink/StarRocks Migration Tool
 
-A modern, configurable utility to generate Flink CDC and StarRocks DDL scripts from SQL Server schemas with automatic data type mapping and change detection.
+A modern, configurable utility to generate **complete, ready-to-run** Flink CDC pipelines and StarRocks DDL scripts from SQL Server schemas with automatic data type mapping and change detection.
+
+## Key Improvements
+
+This tool generates **production-ready, single-file SQL scripts** that can be executed directly:
+
+- **🚀 One Command Deployment** - Run `./bin/sql-client.sh -f job.sql` to start your entire CDC pipeline
+- **📦 Complete Pipeline in One File** - CDC sources + StarRocks sinks + data sync in a single SQL script
+- **🔄 STATEMENT SET** - All tables sync as ONE Flink job with shared state and checkpointing
+- **⚙️ Cluster-Aware** - Inherits your Flink cluster configuration, optional job-specific overrides
+- **🎯 Pattern-Based Discovery** - Auto-discover tables using regex patterns, no manual table lists
+- **🔧 Flexible Organization** - Split 200+ tables across multiple Flink jobs for better management
+- **✅ Production-Grade** - Exactly-once semantics, incremental snapshots, comprehensive CDC configuration
 
 ## Features
 
+- ✅ **Complete Pipeline Generation** - Single-file Flink SQL script ready to execute
+- ✅ **STATEMENT SET Support** - All tables synchronized as one Flink job with shared checkpointing
+- ✅ **Cluster-Aware Configuration** - Inherits cluster settings with optional job-specific overrides
+- ✅ **Dual Table Generation** - Creates both CDC source and StarRocks sink tables in Flink
 - ✅ **Automatic Schema Extraction** from SQL Server databases
-- ✅ **Intelligent Type Mapping** with customizable overrides
-- ✅ **Flink CDC Table Generation** with proper connector configuration
-- ✅ **StarRocks DDL Generation** with optimal table properties
-- ✅ **Schema Checksums** for change tracking
-- ✅ **Change Detection** to identify schema differences
-- ✅ **YAML/JSON Configuration** for easy maintenance
-- ✅ **Extensible Type System** with default mappings for all SQL Server types
+- ✅ **Intelligent Type Mapping** with customizable overrides (38+ SQL Server types)
+- ✅ **Pattern-Based Discovery** - Regex patterns to include/exclude tables and columns
+- ✅ **Per-Table Overrides** - Custom primary keys, column filters, and type mappings
+- ✅ **Schema Checksums** for change tracking with SHA-256 hashing
+- ✅ **Change Detection** to identify schema differences between runs
+- ✅ **Multi-Job Organization** - Split large schemas into multiple Flink jobs
+- ✅ **YAML/JSON Configuration** for easy maintenance and version control
+- ✅ **Production Ready** - Comprehensive CDC configuration with exactly-once semantics
 
 ## Installation
 
@@ -75,6 +92,13 @@ database:
   port: 1433
   encrypt: true
 
+# StarRocks connection (optional - if omitted, placeholders will be used)
+starRocks:
+  feHost: "${STARROCKS_FE_HOST}"      # Use environment variables for security
+  database: "${STARROCKS_DATABASE}"
+  username: "${STARROCKS_USERNAME}"
+  password: "${STARROCKS_PASSWORD}"
+
 # Schema to process
 schema: "sales"
 
@@ -90,7 +114,7 @@ global:
     exclude:
       - ".*_Archive$"   # Exclude archive tables
       - "^tmp_"         # Exclude temp tables
-  
+
   columns:
     exclude:
       - "^Internal"     # Exclude internal columns
@@ -111,6 +135,43 @@ output:
 - `password`: Database password (use `${ENV_VAR}` for environment variables)
 - `port`: SQL Server port (default: 1433)
 - `encrypt`: Enable encryption (default: true)
+
+#### StarRocks Section (Optional)
+Configure StarRocks connection details. If omitted, placeholders will be used in generated scripts.
+
+- `feHost`: StarRocks Frontend host (e.g., `starrocks.example.com` or `${STARROCKS_FE_HOST}`)
+- `database`: Target StarRocks database name (e.g., `analytics` or `${STARROCKS_DATABASE}`)
+- `username`: StarRocks username (e.g., `root` or `${STARROCKS_USERNAME}`)
+- `password`: StarRocks password (e.g., `password` or `${STARROCKS_PASSWORD}`)
+- `jdbcPort`: JDBC port (optional, default: 9030)
+- `loadPort`: HTTP port for Stream Load (optional, default: 8030)
+
+**Example with direct values:**
+```yaml
+starRocks:
+  feHost: "starrocks-prod.example.com"
+  database: "analytics"
+  username: "root"
+  password: "secure_password"
+```
+
+**Example with environment variables:**
+```yaml
+starRocks:
+  feHost: "${STARROCKS_FE_HOST}"
+  database: "${STARROCKS_DATABASE}"
+  username: "${STARROCKS_USERNAME}"
+  password: "${STARROCKS_PASSWORD}"
+```
+
+**Mixed approach (recommended for production):**
+```yaml
+starRocks:
+  feHost: "starrocks-prod.example.com"  # Direct value
+  database: "${STARROCKS_DATABASE}"      # From environment
+  username: "${STARROCKS_USERNAME}"      # From environment
+  password: "${STARROCKS_PASSWORD}"      # From environment (secure)
+```
 
 #### Schema Section
 - `schema`: Database schema name (required)
@@ -215,24 +276,35 @@ Options:
 
 The tool generates three types of files per schema/job:
 
-### 1. Flink CDC Tables (`output/flink/{jobName}_flink.sql`)
+### 1. Flink CDC Pipeline (`output/flink/{jobName}_flink.sql`)
 
-The generated Flink script includes:
+The generated Flink script is a **complete, ready-to-run pipeline** that includes:
 
-**A. Job Configuration** (at the top of the file):
+**A. Job Configuration** (optional cluster overrides):
 ```sql
--- Checkpoint and savepoint configuration
-SET 'execution.checkpointing.interval' = '60s';
-SET 'execution.checkpointing.mode' = 'EXACTLY_ONCE';
-SET 'state.backend' = 'rocksdb';
-SET 'state.checkpoints.dir' = 'hdfs:///flink/checkpoints/my_job';
-SET 'state.savepoints.dir' = 'hdfs:///flink/savepoints/my_job';
--- ... and more configuration
+-- =============================================================================
+-- Flink Job Configuration for sales_realtime_sync
+-- =============================================================================
+-- NOTE: Your cluster already has checkpoint configuration in flink-conf.yaml:
+--   - Checkpoint Interval: 30s
+--   - Mode: EXACTLY_ONCE
+--   - State Backend: RocksDB
+--   - Storage: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/
+--
+-- The settings below are OPTIONAL job-specific overrides.
+-- =============================================================================
+
+-- OPTIONAL: Job-Specific Storage Paths
+-- SET 'state.checkpoints.dir' = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints/sales_realtime_sync';
+-- SET 'state.savepoints.dir' = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/sales_realtime_sync';
+
+-- CDC Source Configuration (recommended)
+SET 'table.exec.source.idle-timeout' = '30s';
 ```
 
-**B. Table Definitions**:
+**B. MSSQL CDC Source Tables**:
 ```sql
-CREATE TABLE `sales_Orders` (
+CREATE TABLE `sales_Orders_mssql` (
   `OrderId` INT NOT NULL,
   `CustomerId` INT NOT NULL,
   `OrderDate` TIMESTAMP(3),
@@ -241,19 +313,75 @@ CREATE TABLE `sales_Orders` (
 ) WITH (
   'connector' = 'sqlserver-cdc',
   'hostname' = '<YOUR_SQL_SERVER_HOST>',
+  'database-name' = '<DATABASE>',
+  'schema-name' = 'sales',
+  'table-name' = 'Orders',
   'scan.incremental.snapshot.enabled' = 'true',
   'debezium.snapshot.mode' = 'initial',
   -- ... full CDC configuration
 );
 ```
 
-> 📖 **See [FLINK_OPERATIONS.md](FLINK_OPERATIONS.md)** for complete guide on checkpoints, savepoints, and job recovery.
+**C. StarRocks Sink Tables** (Flink connectors):
+```sql
+CREATE TABLE `sales_Orders_sink` (
+  `OrderId` INT NOT NULL,
+  `CustomerId` INT NOT NULL,
+  `OrderDate` TIMESTAMP(3),
+  `TotalAmount` DECIMAL(18,2),
+  PRIMARY KEY (`OrderId`) NOT ENFORCED
+) WITH (
+  'connector' = 'starrocks',
+  'jdbc-url' = 'jdbc:mysql://<STARROCKS_FE_HOST>:9030',
+  'load-url' = '<STARROCKS_FE_HOST>:8030',
+  'database-name' = '<STARROCKS_DATABASE>',
+  'table-name' = 'sales_Orders',
+  'sink.buffer-flush.max-rows' = '500000',
+  'sink.buffer-flush.max-bytes' = '104857600',
+  -- ... Stream Load configuration
+);
+```
 
-### 2. StarRocks Tables (`output/starrocks/{jobName}_starrocks.sql`)
+**D. Data Synchronization** (Single Job with STATEMENT SET):
+```sql
+-- All INSERT statements run as a SINGLE Flink job with shared checkpointing
+EXECUTE STATEMENT SET
+BEGIN
+
+  -- Sync: sales.Orders
+  INSERT INTO `sales_Orders_sink` (`OrderId`, `CustomerId`, `OrderDate`, `TotalAmount`)
+  SELECT `OrderId`, `CustomerId`, `OrderDate`, `TotalAmount`
+  FROM `sales_Orders_mssql`;
+
+  -- Sync: sales.OrderDetails
+  INSERT INTO `sales_OrderDetails_sink` (...)
+  SELECT ...
+  FROM `sales_OrderDetails_mssql`;
+
+END;
+```
+
+**To Execute the Pipeline:**
+```bash
+# Run the complete pipeline as a single Flink job
+./bin/sql-client.sh -f sales_realtime_sync_flink.sql
+
+# Or in SQL Client interactive mode
+./bin/sql-client.sh
+Flink SQL> SOURCE 'sales_realtime_sync_flink.sql';
+```
+
+### 2. StarRocks Target Tables (`output/starrocks/{jobName}_starrocks.sql`)
+
+**IMPORTANT:** Execute this script in **StarRocks SQL Client** BEFORE running the Flink pipeline.
 
 ```sql
--- StarRocks Table Definitions for sales
--- Job: sales_realtime_sync
+-- ============================================================================
+-- StarRocks Target Table for sales.Orders
+-- ============================================================================
+-- IMPORTANT: This script should be executed in StarRocks SQL Client
+-- DO NOT run this script in Flink - it uses StarRocks-specific types and syntax
+-- ============================================================================
 
 CREATE TABLE IF NOT EXISTS `sales_Orders` (
   `OrderId` INT NOT NULL,
@@ -264,13 +392,16 @@ CREATE TABLE IF NOT EXISTS `sales_Orders` (
 PRIMARY KEY (`OrderId`)
 DISTRIBUTED BY HASH(`OrderId`)
 PROPERTIES (
-  "replication_num" = "3"
+  "replication_num" = "3",
+  "storage_format" = "DEFAULT"
 );
 
-CREATE TABLE IF NOT EXISTS `sales_OrderDetails` (
-  ...
-);
+-- Additional tables follow...
 ```
+
+**Execution Order:**
+1. **First**: Run `{jobName}_starrocks.sql` in StarRocks to create target tables
+2. **Then**: Run `{jobName}_flink.sql` in Flink to start CDC replication
 
 ### 3. Schema Checksums (`output/checksums/{jobName}_checksums.json`)
 
@@ -672,43 +803,81 @@ pipeline {
 1. **Initial Setup**
    ```bash
    # Generate baseline scripts
-   npm run generate -- -c config.yaml
-   
+   npm run generate -- -c config/sales_schema.yaml
+
+   # Review generated files
+   ls -l output/flink/sales_realtime_sync_flink.sql
+   ls -l output/starrocks/sales_realtime_sync_starrocks.sql
+
    # Commit checksums to version control
-   git add output/checksums/checksums.json
-   git commit -m "Initial schema baseline"
+   git add output/checksums/sales_realtime_sync_checksums.json
+   git commit -m "Initial schema baseline for sales"
    ```
 
-2. **Regular Updates**
+2. **Deploy to StarRocks (First Time)**
+   ```bash
+   # Execute StarRocks DDL to create target tables
+   mysql -h <starrocks-host> -P 9030 -u root < output/starrocks/sales_realtime_sync_starrocks.sql
+
+   # Verify tables created
+   mysql -h <starrocks-host> -P 9030 -u root -e "SHOW TABLES FROM your_database;"
+   ```
+
+3. **Deploy Flink Pipeline**
+   ```bash
+   # Update connection parameters in the generated file
+   vim output/flink/sales_realtime_sync_flink.sql
+   # Replace <YOUR_SQL_SERVER_HOST>, <STARROCKS_FE_HOST>, etc.
+
+   # Run complete pipeline as single Flink job
+   ./bin/sql-client.sh -f output/flink/sales_realtime_sync_flink.sql
+
+   # Monitor job
+   ./bin/flink list
+   ```
+
+4. **Regular Updates (Schema Changes)**
    ```bash
    # Detect changes
-   npm run generate -- -c config.yaml --detect-changes
-   
+   npm run generate -- -c config/sales_schema.yaml --detect-changes
+
    # Review changes
-   git diff output/
-   
-   # Apply to Flink/StarRocks
-   # ... apply scripts manually or via automation
-   
-   # Update baseline
-   git add output/checksums/checksums.json
-   git commit -m "Schema update: Added CustomerEmail column"
+   git diff output/checksums/sales_realtime_sync_checksums.json
+
+   # If schema changed:
+   # 1. Stop Flink job (create savepoint first!)
+   flink stop --savepointPath /path/to/savepoints <job-id>
+
+   # 2. Update StarRocks tables (add new columns)
+   mysql -h <starrocks-host> -P 9030 -u root < output/starrocks/sales_realtime_sync_starrocks.sql
+
+   # 3. Restart Flink job from savepoint
+   ./bin/sql-client.sh -f output/flink/sales_realtime_sync_flink.sql \
+     -s wasbs://flink@storage.blob.core.windows.net/savepoints/sales_realtime_sync/savepoint-xxxxx
+
+   # 4. Update baseline
+   git add output/checksums/sales_realtime_sync_checksums.json
+   git commit -m "Schema update: Added CustomerEmail column to sales.Orders"
    ```
 
-3. **Production Deployment**
+5. **Production Deployment**
    ```bash
-   # Generate production scripts
+   # Generate production scripts with prod config
    npm run generate -- -c config.prod.yaml
-   
-   # Review DDL
-   less output/flink/flink_tables.sql
-   less output/starrocks/starrocks_tables.sql
-   
+
+   # Review DDL differences
+   diff output/flink/sales_realtime_sync_flink.sql.old output/flink/sales_realtime_sync_flink.sql
+
    # Test in staging first
-   flink-sql < output/flink/flink_tables.sql
-   
-   # Deploy to production
-   # ... after validation
+   ./bin/sql-client.sh -f output/flink/sales_realtime_sync_flink.sql
+
+   # Monitor for issues
+   ./bin/flink list
+
+   # Check StarRocks data
+   mysql -h <starrocks-host> -P 9030 -u root -e "SELECT COUNT(*) FROM sales_Orders;"
+
+   # After validation, deploy to production
    ```
 
 ## Performance Considerations
@@ -743,19 +912,46 @@ database:
   database: "${SQL_DATABASE}"
   user: "${SQL_USER}"
   password: "${SQL_PASSWORD}"
+
+starRocks:
+  feHost: "${STARROCKS_FE_HOST}"
+  database: "${STARROCKS_DATABASE}"
+  username: "${STARROCKS_USERNAME}"
+  password: "${STARROCKS_PASSWORD}"
 ```
 
 Set environment variables:
 ```bash
+# SQL Server credentials
 export SQL_SERVER="localhost"
 export SQL_DATABASE="MyDB"
 export SQL_USER="admin"
 export SQL_PASSWORD="secure_password"
+
+# StarRocks credentials
+export STARROCKS_FE_HOST="starrocks.example.com"
+export STARROCKS_DATABASE="analytics"
+export STARROCKS_USERNAME="root"
+export STARROCKS_PASSWORD="starrocks_password"
 ```
 
 Or use a `.env` file with `dotenv`:
 ```bash
 npm install dotenv
+```
+
+Create a `.env` file:
+```bash
+# .env file
+SQL_SERVER=localhost
+SQL_DATABASE=MyDB
+SQL_USER=admin
+SQL_PASSWORD=secure_password
+
+STARROCKS_FE_HOST=starrocks.example.com
+STARROCKS_DATABASE=analytics
+STARROCKS_USERNAME=root
+STARROCKS_PASSWORD=starrocks_password
 ```
 
 Update script to load environment:

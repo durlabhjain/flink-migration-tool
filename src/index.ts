@@ -23,6 +23,15 @@ interface DatabaseConfig {
   encrypt?: boolean;
 }
 
+interface StarRocksConfig {
+  feHost: string;           // Frontend host (e.g., 'starrocks.example.com' or '${STARROCKS_FE_HOST}')
+  database: string;          // Target database name (e.g., 'analytics' or '${STARROCKS_DATABASE}')
+  username: string;          // StarRocks username (e.g., 'root' or '${STARROCKS_USERNAME}')
+  password: string;          // StarRocks password (e.g., 'password' or '${STARROCKS_PASSWORD}')
+  jdbcPort?: number;         // JDBC port (default: 9030)
+  loadPort?: number;         // HTTP port for Stream Load (default: 8030)
+}
+
 interface TypeMapping {
   sqlServer: string;
   flink: string;
@@ -50,6 +59,7 @@ interface TableOverride {
 
 interface SchemaConfig {
   database: DatabaseConfig;
+  starRocks?: StarRocksConfig;  // Optional StarRocks connection config
   schema: string;  // Schema name for this config file
   global?: GlobalConfig;  // Global include/exclude patterns
   tableOverrides?: TableOverride[];  // Per-table overrides
@@ -91,7 +101,7 @@ interface TableMetadata {
 
 const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   // Integer types
-  { sqlServer: 'tinyint', flink: 'TINYINT', starRocks: 'TINYINT' },
+  { sqlServer: 'tinyint', flink: 'TINYINT', starRocks: 'SMALLINT' },
   { sqlServer: 'smallint', flink: 'SMALLINT', starRocks: 'SMALLINT' },
   { sqlServer: 'int', flink: 'INT', starRocks: 'INT' },
   { sqlServer: 'bigint', flink: 'BIGINT', starRocks: 'BIGINT' },
@@ -135,6 +145,26 @@ const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   { sqlServer: 'xml', flink: 'STRING', starRocks: 'STRING' },
   { sqlServer: 'json', flink: 'STRING', starRocks: 'JSON' },
 ];
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/**
+ * Resolves environment variable placeholders in config values
+ * Supports ${VAR_NAME} syntax
+ * Example: "${STARROCKS_HOST}" -> "starrocks.example.com"
+ */
+function resolveEnvVars(value: string): string {
+  return value.replace(/\$\{([^}]+)\}/g, (match, envVar) => {
+    const envValue = process.env[envVar];
+    if (envValue === undefined) {
+      console.warn(`⚠️  Environment variable ${envVar} is not set, using placeholder: ${match}`);
+      return match;
+    }
+    return envValue;
+  });
+}
 
 // ============================================================================
 // Pattern Matcher
@@ -356,7 +386,11 @@ class TypeMapper {
 // ============================================================================
 
 class FlinkScriptGenerator {
-  constructor(private typeMapper: TypeMapper) {}
+  constructor(
+    private typeMapper: TypeMapper,
+    private databaseConfig: DatabaseConfig,
+    private starRocksConfig?: StarRocksConfig
+  ) {}
 
   generate(tableSchema: TableSchema, override?: TableOverride): string {
     let columns = [...tableSchema.columns];
@@ -383,24 +417,37 @@ class FlinkScriptGenerator {
       ? `,\n  PRIMARY KEY (${primaryKey.map(k => `\`${k}\``).join(', ')}) NOT ENFORCED`
       : '';
 
-    const tableName = `${tableSchema.schema}_${tableSchema.table}`;
+    const tableName = `${tableSchema.schema}_${tableSchema.table}_mssql`;
 
-    return `-- Flink CDC Source Table for ${tableSchema.schema}.${tableSchema.table}
+    // Resolve SQL Server connection details from config
+    const hostname = resolveEnvVars(this.databaseConfig.server);
+    const port = this.databaseConfig.port || 1433;
+    const username = resolveEnvVars(this.databaseConfig.user);
+    const password = resolveEnvVars(this.databaseConfig.password);
+    const database = resolveEnvVars(this.databaseConfig.database);
+
+    return `-- ============================================================================
+-- Flink CDC Source Table for ${tableSchema.schema}.${tableSchema.table}
+-- ============================================================================
+-- IMPORTANT: This script should be executed in Apache Flink SQL Client
+-- DO NOT run this script in StarRocks - it uses Flink-specific types and connectors
+--
 -- Generated: ${tableSchema.timestamp}
 -- Checksum: ${tableSchema.checksum}
+-- ============================================================================
 
 CREATE TABLE \`${tableName}\` (
 ${columnDefs.join(',\n')}${pk}
 ) WITH (
   'connector' = 'sqlserver-cdc',
-  'hostname' = '<YOUR_SQL_SERVER_HOST>',
-  'port' = '1433',
-  'username' = '<USERNAME>',
-  'password' = '<PASSWORD>',
-  'database-name' = '<DATABASE>',
+  'hostname' = '${hostname}',
+  'port' = '${port}',
+  'username' = '${username}',
+  'password' = '${password}',
+  'database-name' = '${database}',
   'schema-name' = '${tableSchema.schema}',
   'table-name' = '${tableSchema.table}',
-  
+
   -- CDC Configuration
   'scan.incremental.snapshot.enabled' = 'true',
   'scan.incremental.snapshot.chunk.size' = '8096',
@@ -409,12 +456,122 @@ ${columnDefs.join(',\n')}${pk}
   'connect.max-retries' = '3',
   'connection.pool.size' = '20',
   'heartbeat.interval' = '30s',
-  
+
   -- Debezium Configuration for Exactly-Once Semantics
   'debezium.snapshot.mode' = 'initial',
   'debezium.snapshot.locking.mode' = 'none',
   'debezium.database.history.store.only.captured.tables.ddl' = 'true'
 );
+`;
+  }
+
+  generateStarRocksSink(tableSchema: TableSchema, override?: TableOverride): string {
+    let columns = [...tableSchema.columns];
+
+    // Apply column filters from override
+    if (override) {
+      if (override.excludeColumns && override.excludeColumns.length > 0) {
+        columns = columns.filter(col => !override.excludeColumns!.includes(col.name));
+      }
+      if (override.includeColumns && override.includeColumns.length > 0) {
+        columns = columns.filter(col => override.includeColumns!.includes(col.name));
+      }
+    }
+
+    const columnDefs = columns.map(col => {
+      const customMapping = override?.customMappings?.[col.name]?.starRocks;
+      const starRocksType = this.typeMapper.mapType(col, 'starRocks', customMapping);
+      const nullable = col.isNullable ? '' : ' NOT NULL';
+      return `  \`${col.name}\` ${starRocksType}${nullable}`;
+    });
+
+    const primaryKey = override?.primaryKey || tableSchema.primaryKey;
+    const pk = primaryKey.length > 0
+      ? `,\n  PRIMARY KEY (${primaryKey.map(k => `\`${k}\``).join(', ')}) NOT ENFORCED`
+      : '';
+
+    const tableName = `${tableSchema.schema}_${tableSchema.table}`;
+    const sinkTableName = `${tableName}_sink`;
+
+    // Resolve StarRocks connection details from config or use placeholders
+    let feHost: string;
+    let jdbcPort: number;
+    let loadPort: number;
+    let database: string;
+    let username: string;
+    let password: string;
+
+    if (this.starRocksConfig) {
+      feHost = resolveEnvVars(this.starRocksConfig.feHost);
+      jdbcPort = this.starRocksConfig.jdbcPort || 9030;
+      loadPort = this.starRocksConfig.loadPort || 8030;
+      database = resolveEnvVars(this.starRocksConfig.database);
+      username = resolveEnvVars(this.starRocksConfig.username);
+      password = resolveEnvVars(this.starRocksConfig.password);
+    } else {
+      feHost = '<STARROCKS_FE_HOST>';
+      jdbcPort = 9030;
+      loadPort = 8030;
+      database = '<STARROCKS_DATABASE>';
+      username = '<STARROCKS_USERNAME>';
+      password = '<STARROCKS_PASSWORD>';
+    }
+
+    return `-- ============================================================================
+-- Flink StarRocks Sink Table for ${tableSchema.schema}.${tableSchema.table}
+-- ============================================================================
+-- This is a Flink connector table that writes to StarRocks
+-- ============================================================================
+
+CREATE TABLE \`${sinkTableName}\` (
+${columnDefs.join(',\n')}${pk}
+) WITH (
+  'connector' = 'starrocks',
+  'jdbc-url' = 'jdbc:mysql://${feHost}:${jdbcPort}',
+  'load-url' = '${feHost}:${loadPort}',
+  'database-name' = '${database}',
+  'table-name' = '${tableName}',
+  'username' = '${username}',
+  'password' = '${password}',
+
+  -- Stream Load Configuration
+  'sink.buffer-flush.max-rows' = '500000',
+  'sink.buffer-flush.max-bytes' = '104857600',  -- 100MB
+  'sink.buffer-flush.interval-ms' = '10000',    -- 10 seconds
+  'sink.max-retries' = '3',
+  'sink.parallelism' = '1',
+
+  -- Stream Load Properties
+  'sink.properties.format' = 'json',
+  'sink.properties.strip_outer_array' = 'true'
+);
+`;
+  }
+
+  generateInsertStatement(tableSchema: TableSchema, override?: TableOverride): string {
+    const tableName = `${tableSchema.schema}_${tableSchema.table}`;
+    const sourceTableName = `${tableName}_mssql`;
+    const sinkTableName = `${tableName}_sink`;
+
+    // Apply column filters from override (same logic as in generate() and generateStarRocksSink())
+    let columns = [...tableSchema.columns];
+
+    if (override) {
+      if (override.excludeColumns && override.excludeColumns.length > 0) {
+        columns = columns.filter(col => !override.excludeColumns!.includes(col.name));
+      }
+      if (override.includeColumns && override.includeColumns.length > 0) {
+        columns = columns.filter(col => override.includeColumns!.includes(col.name));
+      }
+    }
+
+    // Build explicit column list
+    const columnList = columns.map(col => `\`${col.name}\``).join(', ');
+
+    return `  -- Sync: ${tableSchema.schema}.${tableSchema.table}
+  INSERT INTO \`${sinkTableName}\` (${columnList})
+  SELECT ${columnList}
+  FROM \`${sourceTableName}\`;
 `;
   }
 
@@ -520,9 +677,15 @@ class StarRocksScriptGenerator {
 
     const tableName = `${tableSchema.schema}_${tableSchema.table}`;
 
-    return `-- StarRocks Target Table for ${tableSchema.schema}.${tableSchema.table}
+    return `-- ============================================================================
+-- StarRocks Target Table for ${tableSchema.schema}.${tableSchema.table}
+-- ============================================================================
+-- IMPORTANT: This script should be executed in StarRocks SQL Client
+-- DO NOT run this script in Flink - it uses StarRocks-specific types and syntax
+--
 -- Generated: ${tableSchema.timestamp}
 -- Checksum: ${tableSchema.checksum}
+-- ============================================================================
 
 CREATE TABLE IF NOT EXISTS \`${tableName}\` (
 ${columnDefs.join(',\n')}
@@ -600,7 +763,7 @@ class MigrationScriptGenerator {
   constructor(private config: SchemaConfig) {
     this.extractor = new SchemaExtractor(config.database);
     this.typeMapper = new TypeMapper(config.typeMappings);
-    this.flinkGenerator = new FlinkScriptGenerator(this.typeMapper);
+    this.flinkGenerator = new FlinkScriptGenerator(this.typeMapper, config.database, config.starRocks);
     this.starRocksGenerator = new StarRocksScriptGenerator(this.typeMapper);
     this.changeDetector = new SchemaChangeDetector();
   }
@@ -610,19 +773,32 @@ class MigrationScriptGenerator {
 
     const allSchemas: Record<string, TableSchema> = {};
     const jobName = this.config.jobName || this.config.schema;
-    
-    let flinkScript = this.flinkGenerator.generateJobConfig(jobName);
-    flinkScript += `-- Flink CDC Table Definitions for ${this.config.schema}\n`;
-    if (this.config.jobName) {
-      flinkScript += `-- Job: ${this.config.jobName}\n`;
-    }
-    flinkScript += `\n`;
-    
+
     let starRocksScript = `-- StarRocks Table Definitions for ${this.config.schema}\n`;
     if (this.config.jobName) {
       starRocksScript += `-- Job: ${this.config.jobName}\n`;
     }
     starRocksScript += `\n`;
+
+    // Complete pipeline script
+    let pipelineScript = this.flinkGenerator.generateJobConfig(jobName);
+    pipelineScript += `-- =============================================================================\n`;
+    pipelineScript += `-- Complete Flink CDC Pipeline for ${this.config.schema}\n`;
+    if (this.config.jobName) {
+      pipelineScript += `-- Job: ${this.config.jobName}\n`;
+    }
+    pipelineScript += `--\n`;
+    pipelineScript += `-- This script contains:\n`;
+    pipelineScript += `--   1. MSSQL CDC source tables\n`;
+    pipelineScript += `--   2. StarRocks sink tables (Flink connectors)\n`;
+    pipelineScript += `--   3. INSERT statements for data synchronization\n`;
+    pipelineScript += `--\n`;
+    pipelineScript += `-- Prerequisites:\n`;
+    pipelineScript += `--   - StarRocks tables must be created first (run {jobname}_starrocks.sql in StarRocks)\n`;
+    pipelineScript += `--   - Update connection parameters (marked with <...>)\n`;
+    pipelineScript += `--   - Required Flink dependencies must be in lib/ folder\n`;
+    pipelineScript += `--\n`;
+    pipelineScript += `-- =============================================================================\n\n`;
 
     console.log(`\n📋 Processing schema: ${this.config.schema}`);
     if (this.config.jobName) {
@@ -640,6 +816,9 @@ class MigrationScriptGenerator {
     if (tables.length === 0) {
       console.warn(`⚠️  No tables found matching the specified patterns`);
     }
+
+    // Store table schemas and overrides for pipeline generation
+    const tableSchemas: Array<{ schema: TableSchema; override?: TableOverride }> = [];
 
     for (const tableMetadata of tables) {
       console.log(`\n   Processing table: ${tableMetadata.table}`);
@@ -665,8 +844,8 @@ class MigrationScriptGenerator {
       console.log(`      Primary Key: ${schema.primaryKey.join(', ') || 'none'}`);
 
       allSchemas[`${schema.schema}.${schema.table}`] = schema;
+      tableSchemas.push({ schema, override });
 
-      flinkScript += this.flinkGenerator.generate(schema, override) + '\n';
       starRocksScript += this.starRocksGenerator.generate(schema, override) + '\n';
 
       // Detect changes if requested
@@ -693,6 +872,45 @@ class MigrationScriptGenerator {
       }
     }
 
+    // Generate complete pipeline script
+    pipelineScript += `-- =============================================================================\n`;
+    pipelineScript += `-- SECTION 1: MSSQL CDC Source Tables\n`;
+    pipelineScript += `-- =============================================================================\n\n`;
+
+    for (const { schema, override } of tableSchemas) {
+      pipelineScript += this.flinkGenerator.generate(schema, override) + '\n';
+    }
+
+    pipelineScript += `\n-- =============================================================================\n`;
+    pipelineScript += `-- SECTION 2: StarRocks Sink Tables (Flink Connectors)\n`;
+    pipelineScript += `-- =============================================================================\n\n`;
+
+    for (const { schema, override } of tableSchemas) {
+      pipelineScript += this.flinkGenerator.generateStarRocksSink(schema, override) + '\n';
+    }
+
+    pipelineScript += `\n-- =============================================================================\n`;
+    pipelineScript += `-- SECTION 3: Data Synchronization (Single Job)\n`;
+    pipelineScript += `-- =============================================================================\n`;
+    pipelineScript += `-- All INSERT statements run as a SINGLE Flink job using STATEMENT SET.\n`;
+    pipelineScript += `-- This ensures all tables are synchronized together with shared checkpointing.\n`;
+    pipelineScript += `--\n`;
+    pipelineScript += `-- To execute:\n`;
+    pipelineScript += `--   ./bin/sql-client.sh -f ${jobName}_flink.sql\n`;
+    pipelineScript += `--\n`;
+    pipelineScript += `-- Or submit via SQL Client:\n`;
+    pipelineScript += `--   ./bin/sql-client.sh\n`;
+    pipelineScript += `--   Flink SQL> SOURCE '${jobName}_flink.sql';\n`;
+    pipelineScript += `-- =============================================================================\n\n`;
+
+    pipelineScript += `EXECUTE STATEMENT SET\nBEGIN\n\n`;
+
+    for (const { schema, override } of tableSchemas) {
+      pipelineScript += this.flinkGenerator.generateInsertStatement(schema, override) + '\n';
+    }
+
+    pipelineScript += `END;\n`;
+
     await this.extractor.disconnect();
 
     // Write output files
@@ -704,13 +922,13 @@ class MigrationScriptGenerator {
     const starRocksFile = path.join(this.config.output.starRocksPath, `${jobName}_starrocks.sql`);
     const checksumFile = path.join(this.config.output.checksumPath, `${jobName}_checksums.json`);
 
-    fs.writeFileSync(flinkFile, flinkScript);
+    fs.writeFileSync(flinkFile, pipelineScript);
     fs.writeFileSync(starRocksFile, starRocksScript);
     fs.writeFileSync(checksumFile, JSON.stringify(allSchemas, null, 2));
 
     console.log(`\n✅ Scripts generated successfully!`);
-    console.log(`   Flink: ${flinkFile}`);
-    console.log(`   StarRocks: ${starRocksFile}`);
+    console.log(`   Flink CDC Pipeline: ${flinkFile}`);
+    console.log(`   StarRocks DDL: ${starRocksFile}`);
     console.log(`   Checksums: ${checksumFile}`);
   }
 }
