@@ -101,7 +101,7 @@ interface TableMetadata {
 
 const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   // Integer types
-  { sqlServer: 'tinyint', flink: 'TINYINT', starRocks: 'SMALLINT' },
+  { sqlServer: 'tinyint', flink: 'SMALLINT', starRocks: 'SMALLINT' },
   { sqlServer: 'smallint', flink: 'SMALLINT', starRocks: 'SMALLINT' },
   { sqlServer: 'int', flink: 'INT', starRocks: 'INT' },
   { sqlServer: 'bigint', flink: 'BIGINT', starRocks: 'BIGINT' },
@@ -445,8 +445,7 @@ ${columnDefs.join(',\n')}${pk}
   'username' = '${username}',
   'password' = '${password}',
   'database-name' = '${database}',
-  'schema-name' = '${tableSchema.schema}',
-  'table-name' = '${tableSchema.table}',
+  'table-name' = 'dbo.${tableSchema.table}',
 
   -- CDC Configuration
   'scan.incremental.snapshot.enabled' = 'true',
@@ -455,7 +454,6 @@ ${columnDefs.join(',\n')}${pk}
   'connect.timeout' = '30s',
   'connect.max-retries' = '3',
   'connection.pool.size' = '20',
-  'heartbeat.interval' = '30s',
 
   -- Debezium Configuration for Exactly-Once Semantics
   'debezium.snapshot.mode' = 'initial',
@@ -479,10 +477,10 @@ ${columnDefs.join(',\n')}${pk}
     }
 
     const columnDefs = columns.map(col => {
-      const customMapping = override?.customMappings?.[col.name]?.starRocks;
-      const starRocksType = this.typeMapper.mapType(col, 'starRocks', customMapping);
+      const customMapping = override?.customMappings?.[col.name]?.flink;
+      const flinkType = this.typeMapper.mapType(col, 'flink', customMapping);
       const nullable = col.isNullable ? '' : ' NOT NULL';
-      return `  \`${col.name}\` ${starRocksType}${nullable}`;
+      return `  \`${col.name}\` ${flinkType}${nullable}`;
     });
 
     const primaryKey = override?.primaryKey || tableSchema.primaryKey;
