@@ -1,0 +1,35 @@
+# Base Configuration for I/O Analysis
+# Auto-generated configs will inherit these settings
+
+database:
+  server: "206.221.176.66"
+  database: "tls-test"
+  user: "tls-test"
+  password: "eDjLTa2r"
+  port: 1433
+  encrypt: false
+
+starRocks:
+  feHost: "192.168.5.235"
+  database: "tls_test"
+  username: "root"
+  password: ""
+  jdbcPort: 9030
+  loadPort: 8030
+
+schema: "dbo"
+
+# Optional: job name for organizing output
+jobName: "tls_data_sync"
+
+# Global filters applied to ALL auto-generated configs
+global:
+  # Exclude unwanted columns globally
+  columns:
+    exclude:
+      - "Version"
+
+output:
+  flinkPath: "./output/flink"
+  starRocksPath: "./output/starrocks"
+  checksumPath: "./output/checksums"

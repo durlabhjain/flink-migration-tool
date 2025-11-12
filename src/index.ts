@@ -9,6 +9,8 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { Command } from 'commander';
 import { glob } from 'glob';
+import { IOAnalyzer } from './io-analyzer';
+import { ConfigGenerator } from './config-generator';
 
 // ============================================================================
 // Configuration Types
@@ -146,6 +148,8 @@ const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   { sqlServer: 'json', flink: 'STRING', starRocks: 'JSON' },
 ];
 
+const VARCHAR_MAX_LENGTH = 65535;
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -175,8 +179,19 @@ class PatternMatcher {
     if (!patterns || patterns.length === 0) return true;
     
     return patterns.some(pattern => {
+      // Exact match - if pattern has no wildcards, require exact match
+      if (!pattern.includes('*') && !pattern.includes('?')) {
+        return value.toLowerCase() === pattern.toLowerCase();
+      }
+      
       try {
-        const regex = new RegExp(pattern, 'i');
+        // Convert glob pattern to regex
+        const regexPattern = pattern
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&') // Escape special regex chars
+          .replace(/\*/g, '.*')  // * matches any characters
+          .replace(/\?/g, '.');  // ? matches single character
+        
+        const regex = new RegExp(`^${regexPattern}$`, 'i');
         return regex.test(value);
       } catch (error) {
         console.warn(`Invalid regex pattern: ${pattern}`);
@@ -298,7 +313,7 @@ class SchemaExtractor {
       name: row.name,
       sqlServerType: row.dataType.toLowerCase(),
       isNullable: row.isNullable === 'YES',
-      maxLength: row.maxLength,
+      maxLength: row.maxLength == -1 ? VARCHAR_MAX_LENGTH : row.maxLength,
       precision: row.precision,
       scale: row.scale,
     }));
@@ -454,6 +469,7 @@ ${columnDefs.join(',\n')}${pk}
   'connect.timeout' = '30s',
   'connect.max-retries' = '3',
   'connection.pool.size' = '20',
+  'scan.startup.mode' = 'initial',
 
   -- Debezium Configuration for Exactly-Once Semantics
   'debezium.snapshot.mode' = 'initial',
@@ -691,7 +707,7 @@ ${columnDefs.join(',\n')}
 PRIMARY KEY (${pk})
 DISTRIBUTED BY HASH(${pk})
 PROPERTIES (
-  "replication_num" = "3",
+  "replication_num" = "1",
   "storage_format" = "DEFAULT"
 );
 `;
@@ -997,6 +1013,104 @@ program
       console.log(`\n\n✅ All schemas processed successfully!`);
     } catch (error) {
       console.error('❌ Error:', error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('analyze-io')
+  .description('Analyze table I/O patterns and auto-generate optimized config files')
+  .requiredOption('-b, --base-config <path>', 'Path to base configuration file (YAML or JSON)')
+  .option('-o, --output-dir <path>', 'Output directory for generated configs', './configs')
+  .option('--high-threshold <number>', 'I/O operations threshold for high category', '100000')
+  .option('--low-threshold <number>', 'I/O operations threshold for low category', '10000')
+  .option('--max-tables-per-job <number>', 'Maximum tables per job config', '10')
+  .option('--no-group-by-domain', 'Disable domain-based table grouping')
+  .option('--report-only', 'Generate analysis report only (no config files)', false)
+  .action(async (options) => {
+    try {
+      // Load base config
+      const baseConfigPath = options.baseConfig;
+      if (!fs.existsSync(baseConfigPath)) {
+        console.error(`❌ Base config file not found: ${baseConfigPath}`);
+        console.log('\n💡 Create a base config file with your database credentials:');
+        console.log('   See: configs/base_config_template.yaml');
+        process.exit(1);
+      }
+
+      const baseConfigContent = fs.readFileSync(baseConfigPath, 'utf-8');
+      const baseConfig = baseConfigPath.endsWith('.yaml') || baseConfigPath.endsWith('.yml')
+        ? yaml.load(baseConfigContent) as SchemaConfig
+        : JSON.parse(baseConfigContent);
+
+      // Parse thresholds
+      const highIOThreshold = parseInt(options.highThreshold);
+      const lowIOThreshold = parseInt(options.lowThreshold);
+      const maxTablesPerJob = parseInt(options.maxTablesPerJob);
+
+      if (isNaN(highIOThreshold) || isNaN(lowIOThreshold) || isNaN(maxTablesPerJob)) {
+        console.error('❌ Invalid threshold or max-tables-per-job value');
+        process.exit(1);
+      }
+
+      console.log(`\n🔍 I/O Analysis Configuration:`);
+      console.log(`   High I/O Threshold:     >${highIOThreshold.toLocaleString()} operations`);
+      console.log(`   Low I/O Threshold:      <${lowIOThreshold.toLocaleString()} operations`);
+      console.log(`   Max Tables Per Job:     ${maxTablesPerJob}`);
+      console.log(`   Group By Domain:        ${options.groupByDomain ? 'Yes' : 'No'}`);
+
+      // Initialize analyzer
+      const analyzer = new IOAnalyzer(baseConfig.database);
+      await analyzer.connect();
+
+      // Analyze I/O patterns
+      const tables = await analyzer.analyzeTableIO(baseConfig.schema, {
+        highIOThreshold,
+        lowIOThreshold,
+      });
+
+      await analyzer.disconnect();
+
+      // Display summary
+      analyzer.displaySummary(tables, { highIOThreshold, lowIOThreshold });
+
+      // Generate report
+      const report = analyzer.generateReport(tables, baseConfig.schema, {
+        highIOThreshold,
+        lowIOThreshold,
+      });
+
+      if (options.reportOnly) {
+        // Save report only
+        const outputDir = options.outputDir;
+        if (!fs.existsSync(outputDir)) {
+          fs.mkdirSync(outputDir, { recursive: true });
+        }
+        const reportPath = path.join(outputDir, '_io_analysis_report.json');
+        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+        console.log('━'.repeat(80));
+        console.log(`\n✅ Analysis report saved: ${reportPath}`);
+        console.log('\n💡 To generate config files, run without --report-only flag\n');
+      } else {
+        // Generate config files
+        const configGenerator = new ConfigGenerator(baseConfig, {
+          maxTablesPerJob,
+          groupByDomain: options.groupByDomain,
+        });
+
+        const generatedConfigs = await configGenerator.generateAllConfigs(tables, options.outputDir);
+
+        // Save analysis report with config references
+        configGenerator.saveAnalysisReport(report, options.outputDir);
+
+        // Display summary
+        configGenerator.displaySummary(options.outputDir);
+      }
+    } catch (error) {
+      console.error('❌ Error:', error);
+      if (error instanceof Error) {
+        console.error(error.stack);
+      }
       process.exit(1);
     }
   });
