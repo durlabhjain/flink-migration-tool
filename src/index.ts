@@ -987,7 +987,7 @@ program
   .action(async (options) => {
     try {
       const configDir = options.configDir;
-      const configFiles = glob.sync(path.join(configDir, '**/*.{yaml,yml,json}'));
+      const configFiles = glob.sync(path.join(configDir, '**/*.{yaml,yml}'));
 
       if (configFiles.length === 0) {
         console.log(`No config files found in ${configDir}`);
