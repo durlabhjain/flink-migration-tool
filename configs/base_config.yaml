@@ -2,17 +2,17 @@
 # Auto-generated configs will inherit these settings
 
 database:
-  server: "206.221.176.66"
-  database: "tls-test"
-  user: "tls-test"
-  password: "eDjLTa2r"
+  server: ""
+  database: ""
+  user: ""
+  password: ""
   port: 1433
   encrypt: false
 
 starRocks:
-  feHost: "192.168.5.235"
-  database: "tls_test"
-  username: "root"
+  feHost: ""
+  database: ""
+  username: ""
   password: ""
   jdbcPort: 9030
   loadPort: 8030
