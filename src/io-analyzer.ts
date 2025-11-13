@@ -271,7 +271,7 @@ export class IOAnalyzer {
           readWriteRatio,
           rowCount,
           lastActivity: null,
-          category: this.categorizeTable(totalIOOps, options),
+          category: this.categorizeTable(totalWrites, options),
         };
       });
     } catch (statsError: any) {
