@@ -928,11 +928,11 @@ class MigrationScriptGenerator {
     pipelineScript += `-- This ensures all tables are synchronized together with shared checkpointing.\n`;
     pipelineScript += `--\n`;
     pipelineScript += `-- To execute:\n`;
-    pipelineScript += `--   ./bin/sql-client.sh -f ${jobName}_flink.sql\n`;
+    pipelineScript += `--   ./bin/sql-client.sh -f ${jobName}.sql\n`;
     pipelineScript += `--\n`;
     pipelineScript += `-- Or submit via SQL Client:\n`;
     pipelineScript += `--   ./bin/sql-client.sh\n`;
-    pipelineScript += `--   Flink SQL> SOURCE '${jobName}_flink.sql';\n`;
+    pipelineScript += `--   Flink SQL> SOURCE '${jobName}.sql';\n`;
     pipelineScript += `-- =============================================================================\n\n`;
 
     pipelineScript += `EXECUTE STATEMENT SET\nBEGIN\n\n`;
@@ -950,7 +950,7 @@ class MigrationScriptGenerator {
     fs.mkdirSync(this.config.output.starRocksPath, { recursive: true });
     fs.mkdirSync(this.config.output.checksumPath, { recursive: true });
 
-    const flinkFile = path.join(this.config.output.flinkPath, `${jobName}_flink.sql`);
+    const flinkFile = path.join(this.config.output.flinkPath, `${jobName}.sql`);
     const starRocksFile = path.join(this.config.output.starRocksPath, `${jobName}_starrocks.sql`);
     const checksumFile = path.join(this.config.output.checksumPath, `${jobName}_checksums.json`);
 
