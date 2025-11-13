@@ -20,6 +20,7 @@ export interface TableIOStats {
 export interface IOAnalysisOptions {
   highIOThreshold: number;    // Default: 100000
   lowIOThreshold: number;     // Default: 10000
+  excludeTables?: string[];   // Optional: Tables to exclude from analysis
 }
 
 export interface IOAnalysisReport {
@@ -199,6 +200,18 @@ export class IOAnalyzer {
     }
 
     console.log(`   Analyzing I/O patterns...`);
+
+    // Filter out excluded tables if specified
+    if (options.excludeTables && options.excludeTables.length > 0) {
+      const excludeSet = new Set(options.excludeTables.map(t => t.toLowerCase()));
+      const beforeCount = tables.length;
+      tables = tables.filter(t => !excludeSet.has(t.table.toLowerCase()));
+      const excludedCount = beforeCount - tables.length;
+      if (excludedCount > 0) {
+        console.log(`   ℹ️  Excluded ${excludedCount} table(s) from analysis`);
+      }
+    }
+
     console.log(`   ✓ Categorization complete\n`);
 
     return tables;

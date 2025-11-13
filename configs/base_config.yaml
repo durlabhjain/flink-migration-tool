@@ -33,6 +33,13 @@ global:
   columns:
     exclude:
       - "Version"
+      
+  # Exclude specific tables from I/O analysis and job generation
+  # These tables will not be included in any generated config files
+  tables:
+    exclude:
+      # - "Table Name 1"
+      # - "Table Name 2"
 
 output:
   flinkPath: "./output/flink"

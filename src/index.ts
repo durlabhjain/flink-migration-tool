@@ -1081,10 +1081,18 @@ program
       const analyzer = new IOAnalyzer(baseConfig.database);
       await analyzer.connect();
 
+      // Prepare exclude list from global config
+      const excludeTables = baseConfig.global?.tables?.exclude || [];
+
+      if (excludeTables.length > 0) {
+        console.log(`   Excluding Tables:       ${excludeTables.join(', ')}`);
+      }
+
       // Analyze I/O patterns
       const tables = await analyzer.analyzeTableIO(baseConfig.schema, {
         highIOThreshold,
         lowIOThreshold,
+        excludeTables,
       });
 
       await analyzer.disconnect();
