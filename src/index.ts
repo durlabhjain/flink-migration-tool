@@ -59,6 +59,11 @@ interface TableOverride {
   customMappings?: Record<string, { flink?: string; starRocks?: string }>;
 }
 
+interface FlinkConfig {
+  checkpointDir: string;  // Base checkpoint directory
+  savepointDir: string;   // Base savepoint directory
+}
+
 interface SchemaConfig {
   database: DatabaseConfig;
   starRocks?: StarRocksConfig;  // Optional StarRocks connection config
@@ -72,6 +77,7 @@ interface SchemaConfig {
     checksumPath: string;
   };
   jobName?: string;  // Optional job name for multi-job organization
+  flink?: FlinkConfig;  // Optional Flink checkpoint/savepoint configuration
 }
 
 interface ColumnInfo {
@@ -404,7 +410,8 @@ class FlinkScriptGenerator {
   constructor(
     private typeMapper: TypeMapper,
     private databaseConfig: DatabaseConfig,
-    private starRocksConfig?: StarRocksConfig
+    private starRocksConfig?: StarRocksConfig,
+    private flinkConfig?: FlinkConfig
   ) {}
 
   generate(tableSchema: TableSchema, override?: TableOverride): string {
@@ -590,27 +597,38 @@ ${columnDefs.join(',\n')}${pk}
   }
 
   generateJobConfig(jobName: string): string {
+    // Resolve checkpoint and savepoint directories from config
+    let checkpointDir = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints';
+    let savepointDir = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints';
+
+    if (this.flinkConfig) {
+      checkpointDir = resolveEnvVars(this.flinkConfig.checkpointDir);
+      savepointDir = resolveEnvVars(this.flinkConfig.savepointDir);
+    }
+
+    // Append jobName to the directory paths
+    const fullCheckpointDir = `${checkpointDir}/${jobName}`;
+    const fullSavepointDir = `${savepointDir}/${jobName}`;
+
     return `-- =============================================================================
 -- Flink Job Configuration for ${jobName}
 -- =============================================================================
--- 
+--
 -- NOTE: Your cluster already has checkpoint configuration in flink-conf.yaml:
 --   - Checkpoint Interval: 30s
 --   - Mode: EXACTLY_ONCE
 --   - State Backend: RocksDB
---   - Storage: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/
+--   - Storage: ${checkpointDir}/
 --
 -- The settings below are OPTIONAL job-specific overrides.
 -- Comment out or remove settings you want to inherit from cluster config.
 --
 -- =============================================================================
 
--- ===== OPTIONAL: Job-Specific Storage Paths =====
+-- ===== Job-Specific Storage Paths =====
 -- Organize checkpoints and savepoints by job name
--- Uncomment to override cluster defaults:
-
--- SET 'state.checkpoints.dir' = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints/${jobName}';
--- SET 'state.savepoints.dir' = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}';
+SET 'state.checkpoints.dir' = '${fullCheckpointDir}';
+SET 'state.savepoints.dir' = '${fullSavepointDir}';
 
 -- ===== OPTIONAL: Job-Specific Checkpoint Interval =====
 -- Cluster default is 30s. Uncomment to override for this job:
@@ -640,17 +658,17 @@ SET 'table.exec.source.idle-timeout' = '30s';
 -- =============================================================================
 --
 -- Your cluster automatically resumes from latest checkpoint on restart.
--- Checkpoints are stored in: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints
+-- Checkpoints are stored in: ${fullCheckpointDir}
 --
 -- To list checkpoints for this job:
 --   az storage blob list --account-name coolr0flink0starrocks --container-name flink --prefix checkpoints/${jobName}
 --
 -- To create a savepoint manually:
 --   flink savepoint <job-id>
---   # Savepoint will be stored in: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}
+--   # Savepoint will be stored in: ${fullSavepointDir}
 --
 -- To resume from a specific savepoint:
---   flink run -s wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}/savepoint-123456 -d your-job.jar
+--   flink run -s ${fullSavepointDir}/savepoint-123456 -d your-job.jar
 --
 -- To list savepoints:
 --   az storage blob list --account-name coolr0flink0starrocks --container-name flink --prefix savepoints/${jobName}
@@ -777,7 +795,7 @@ class MigrationScriptGenerator {
   constructor(private config: SchemaConfig) {
     this.extractor = new SchemaExtractor(config.database);
     this.typeMapper = new TypeMapper(config.typeMappings);
-    this.flinkGenerator = new FlinkScriptGenerator(this.typeMapper, config.database, config.starRocks);
+    this.flinkGenerator = new FlinkScriptGenerator(this.typeMapper, config.database, config.starRocks, config.flink);
     this.starRocksGenerator = new StarRocksScriptGenerator(this.typeMapper);
     this.changeDetector = new SchemaChangeDetector();
   }

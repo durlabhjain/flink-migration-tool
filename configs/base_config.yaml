@@ -22,6 +22,11 @@ schema: "dbo"
 # Optional: job name for organizing output
 jobName: "tls_data_sync"
 
+# Flink checkpoint and savepoint configuration
+flink:
+  checkpointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints"
+  savepointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints"
+
 # Global filters applied to ALL auto-generated configs
 global:
   # Exclude unwanted columns globally
