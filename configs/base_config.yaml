@@ -20,7 +20,7 @@ starRocks:
 schema: "dbo"
 
 # Optional: job name for organizing output
-jobName: "tls_data_sync"
+jobName: ""
 
 # Flink checkpoint and savepoint configuration
 flink:

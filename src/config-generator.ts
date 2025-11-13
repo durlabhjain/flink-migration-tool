@@ -112,7 +112,7 @@ export class ConfigGenerator {
   ): Promise<void> {
     const schema = table.schema;
     const tableName = table.table;
-    const jobName = `${schema}_${tableName}_pipeline`;
+    const jobName = `${schema}_${tableName}`;
     const filename = `${schema}_${tableName}_config.yaml`;
     const filepath = path.join(outputDir, filename);
 

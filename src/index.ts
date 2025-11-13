@@ -596,7 +596,7 @@ ${columnDefs.join(',\n')}${pk}
 `;
   }
 
-  generateJobConfig(jobName: string): string {
+  generateJobConfig(jobName: string, databaseName: string): string {
     // Resolve checkpoint and savepoint directories from config
     let checkpointDir = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints';
     let savepointDir = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints';
@@ -606,7 +606,7 @@ ${columnDefs.join(',\n')}${pk}
       savepointDir = resolveEnvVars(this.flinkConfig.savepointDir);
     }
 
-    // Append jobName to the directory paths
+    // Append jobName_databaseName to the directory paths
     const fullCheckpointDir = `${checkpointDir}/${jobName}`;
     const fullSavepointDir = `${savepointDir}/${jobName}`;
 
@@ -804,7 +804,9 @@ class MigrationScriptGenerator {
     await this.extractor.connect();
 
     const allSchemas: Record<string, TableSchema> = {};
-    const jobName = this.config.jobName || this.config.schema;
+    const databaseName = this.config.database.database;
+    const baseJobName = this.config.jobName || this.config.schema;
+    const jobName = `${baseJobName}_${databaseName}`;
 
     let starRocksScript = `-- StarRocks Table Definitions for ${this.config.schema}\n`;
     if (this.config.jobName) {
@@ -813,7 +815,7 @@ class MigrationScriptGenerator {
     starRocksScript += `\n`;
 
     // Complete pipeline script
-    let pipelineScript = this.flinkGenerator.generateJobConfig(jobName);
+    let pipelineScript = this.flinkGenerator.generateJobConfig(jobName, databaseName);
     pipelineScript += `-- =============================================================================\n`;
     pipelineScript += `-- Complete Flink CDC Pipeline for ${this.config.schema}\n`;
     if (this.config.jobName) {
