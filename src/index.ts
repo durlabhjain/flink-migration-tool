@@ -17,7 +17,8 @@ import { ConfigGenerator } from './config-generator';
 // ============================================================================
 
 interface DatabaseConfig {
-  server: string;
+  server: string;              // IP address or hostname for I/O analysis
+  serverHostname?: string;     // Hostname for Flink CDC (optional)
   database: string;
   user: string;
   password: string;
@@ -87,6 +88,8 @@ interface ColumnInfo {
   maxLength?: number;
   precision?: number;
   scale?: number;
+  isComputed?: boolean;
+  computedFormula?: string;
 }
 
 interface TableSchema {
@@ -298,14 +301,22 @@ class SchemaExtractor {
     if (!this.connection) throw new Error('Not connected to database');
 
     const query = `
-      SELECT 
-        c.COLUMN_NAME as name,
-        c.DATA_TYPE as dataType,
-        c.IS_NULLABLE as isNullable,
-        c.CHARACTER_MAXIMUM_LENGTH as maxLength,
-        c.NUMERIC_PRECISION as precision,
-        c.NUMERIC_SCALE as scale
+      SELECT
+        c.COLUMN_NAME AS name,
+        c.DATA_TYPE AS dataType,
+        c.IS_NULLABLE AS isNullable,
+        c.CHARACTER_MAXIMUM_LENGTH AS maxLength,
+        c.NUMERIC_PRECISION AS precision,
+        c.NUMERIC_SCALE AS scale,
+        sc.is_computed AS isComputed,
+        cc.definition AS computedFormula
       FROM INFORMATION_SCHEMA.COLUMNS c
+      JOIN sys.columns sc
+        ON sc.object_id = OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME)
+        AND sc.name = c.COLUMN_NAME
+      LEFT JOIN sys.computed_columns cc
+        ON cc.object_id = sc.object_id
+        AND cc.column_id = sc.column_id
       WHERE c.TABLE_SCHEMA = @schema AND c.TABLE_NAME = @table
       ORDER BY c.ORDINAL_POSITION
     `;
@@ -322,6 +333,8 @@ class SchemaExtractor {
       maxLength: row.maxLength == -1 ? VARCHAR_MAX_LENGTH : row.maxLength,
       precision: row.precision,
       scale: row.scale,
+      isComputed: row.isComputed === true || row.isComputed === 1,
+      computedFormula: row.computedFormula,
     }));
 
     // Apply column patterns
@@ -417,6 +430,9 @@ class FlinkScriptGenerator {
   generate(tableSchema: TableSchema, override?: TableOverride): string {
     let columns = [...tableSchema.columns];
 
+    // Exclude computed columns from Flink CDC source (CDC cannot capture computed columns)
+    columns = columns.filter(col => !col.isComputed);
+
     // Apply column filters from override
     if (override) {
       if (override.excludeColumns && override.excludeColumns.length > 0) {
@@ -439,14 +455,18 @@ class FlinkScriptGenerator {
       ? `,\n  PRIMARY KEY (${primaryKey.map(k => `\`${k}\``).join(', ')}) NOT ENFORCED`
       : '';
 
-    const tableName = `${tableSchema.schema}_${tableSchema.table}_mssql`;
-
     // Resolve SQL Server connection details from config
-    const hostname = resolveEnvVars(this.databaseConfig.server);
+    // Use serverHostname for Flink CDC if available, otherwise fall back to server
+    const hostname = this.databaseConfig.serverHostname
+      ? resolveEnvVars(this.databaseConfig.serverHostname)
+      : resolveEnvVars(this.databaseConfig.server);
     const port = this.databaseConfig.port || 1433;
     const username = resolveEnvVars(this.databaseConfig.user);
     const password = resolveEnvVars(this.databaseConfig.password);
     const database = resolveEnvVars(this.databaseConfig.database);
+
+    // Full table name: dbo.tablename_mssql
+    const fullTableName = `${tableSchema.schema}.${tableSchema.table}_mssql`;
 
     return `-- ============================================================================
 -- Flink CDC Source Table for ${tableSchema.schema}.${tableSchema.table}
@@ -458,7 +478,7 @@ class FlinkScriptGenerator {
 -- Checksum: ${tableSchema.checksum}
 -- ============================================================================
 
-CREATE TABLE \`${tableName}\` (
+CREATE TABLE IF NOT EXISTS \`default_catalog\`.\`${database}\`.\`${fullTableName}\` (
 ${columnDefs.join(',\n')}${pk}
 ) WITH (
   'connector' = 'sqlserver-cdc',
@@ -489,6 +509,9 @@ ${columnDefs.join(',\n')}${pk}
   generateStarRocksSink(tableSchema: TableSchema, override?: TableOverride): string {
     let columns = [...tableSchema.columns];
 
+    // Exclude computed columns from Flink sink (to match CDC source)
+    columns = columns.filter(col => !col.isComputed);
+
     // Apply column filters from override
     if (override) {
       if (override.excludeColumns && override.excludeColumns.length > 0) {
@@ -511,8 +534,12 @@ ${columnDefs.join(',\n')}${pk}
       ? `,\n  PRIMARY KEY (${primaryKey.map(k => `\`${k}\``).join(', ')}) NOT ENFORCED`
       : '';
 
-    const tableName = `${tableSchema.schema}_${tableSchema.table}`;
-    const sinkTableName = `${tableName}_sink`;
+    // Full sink table name: dbo.tablename_sink
+    const sinkTableName = `${tableSchema.schema}.${tableSchema.table}_sink`;
+    // StarRocks table name without schema prefix
+    const starRocksTableName = tableSchema.table;
+    // Flink database name (from config)
+    const flinkDbName = resolveEnvVars(this.databaseConfig.database);
 
     // Resolve StarRocks connection details from config or use placeholders
     let feHost: string;
@@ -544,14 +571,14 @@ ${columnDefs.join(',\n')}${pk}
 -- This is a Flink connector table that writes to StarRocks
 -- ============================================================================
 
-CREATE TABLE \`${sinkTableName}\` (
+CREATE TABLE IF NOT EXISTS \`default_catalog\`.\`${flinkDbName}\`.\`${sinkTableName}\` (
 ${columnDefs.join(',\n')}${pk}
 ) WITH (
   'connector' = 'starrocks',
   'jdbc-url' = 'jdbc:mysql://${feHost}:${jdbcPort}',
   'load-url' = '${feHost}:${loadPort}',
   'database-name' = '${database}',
-  'table-name' = '${tableName}',
+  'table-name' = '${starRocksTableName}',
   'username' = '${username}',
   'password' = '${password}',
 
@@ -570,12 +597,15 @@ ${columnDefs.join(',\n')}${pk}
   }
 
   generateInsertStatement(tableSchema: TableSchema, override?: TableOverride): string {
-    const tableName = `${tableSchema.schema}_${tableSchema.table}`;
-    const sourceTableName = `${tableName}_mssql`;
-    const sinkTableName = `${tableName}_sink`;
+    const database = resolveEnvVars(this.databaseConfig.database);
+    const sourceTableName = `default_catalog.\`${database}\`.\`${tableSchema.schema}.${tableSchema.table}_mssql\``;
+    const sinkTableName = `default_catalog.\`${database}\`.\`${tableSchema.schema}.${tableSchema.table}_sink\``;
 
     // Apply column filters from override (same logic as in generate() and generateStarRocksSink())
     let columns = [...tableSchema.columns];
+
+    // Exclude computed columns (to match CDC source and sink tables)
+    columns = columns.filter(col => !col.isComputed);
 
     if (override) {
       if (override.excludeColumns && override.excludeColumns.length > 0) {
@@ -590,9 +620,9 @@ ${columnDefs.join(',\n')}${pk}
     const columnList = columns.map(col => `\`${col.name}\``).join(', ');
 
     return `  -- Sync: ${tableSchema.schema}.${tableSchema.table}
-  INSERT INTO \`${sinkTableName}\` (${columnList})
+  INSERT INTO ${sinkTableName} (${columnList})
   SELECT ${columnList}
-  FROM \`${sourceTableName}\`;
+  FROM ${sourceTableName};
 `;
   }
 
@@ -680,7 +710,7 @@ SET 'table.exec.source.idle-timeout' = '30s';
 }
 
 class StarRocksScriptGenerator {
-  constructor(private typeMapper: TypeMapper) {}
+  constructor(private typeMapper: TypeMapper, private databaseName: string) {}
 
   generate(tableSchema: TableSchema, override?: TableOverride): string {
     let columns = [...tableSchema.columns];
@@ -695,19 +725,37 @@ class StarRocksScriptGenerator {
       }
     }
 
-    const columnDefs = columns.map(col => {
+    // Separate computed and regular columns
+    const regularColumns = columns.filter(col => !col.isComputed);
+    const computedColumns = columns.filter(col => col.isComputed);
+
+    // Map regular columns
+    const regularColumnDefs = regularColumns.map(col => {
       const customMapping = override?.customMappings?.[col.name]?.starRocks;
       const starRocksType = this.typeMapper.mapType(col, 'starRocks', customMapping);
       const nullable = col.isNullable ? 'NULL' : 'NOT NULL';
       return `  \`${col.name}\` ${starRocksType} ${nullable}`;
     });
 
+    // Map computed columns as generated columns with their formulas (no type/nullability)
+    const computedColumnDefs = computedColumns.map(col => {
+      const formula = col.computedFormula || '';
+      return `  \`${col.name}\` AS (${formula})`;
+    });
+
+    // Combine regular and computed columns
+    const allColumnDefs = [...regularColumnDefs, ...computedColumnDefs];
+
     const primaryKey = override?.primaryKey || tableSchema.primaryKey;
     const pk = primaryKey.length > 0
       ? primaryKey.map(k => `\`${k}\``).join(', ')
-      : columns[0]?.name || 'id';
+      : regularColumns[0]?.name || 'id';
 
-    const tableName = `${tableSchema.schema}_${tableSchema.table}`;
+    // Table name without schema prefix (dbo_)
+    const tableName = tableSchema.table;
+
+    // Database name with hyphens replaced by underscores
+    const dbName = this.databaseName.replace(/-/g, '_');
 
     return `-- ============================================================================
 -- StarRocks Target Table for ${tableSchema.schema}.${tableSchema.table}
@@ -719,14 +767,14 @@ class StarRocksScriptGenerator {
 -- Checksum: ${tableSchema.checksum}
 -- ============================================================================
 
-CREATE TABLE IF NOT EXISTS \`${tableName}\` (
-${columnDefs.join(',\n')}
-)
-PRIMARY KEY (${pk})
-DISTRIBUTED BY HASH(${pk})
+CREATE TABLE IF NOT EXISTS \`${dbName}\`.\`${tableName}\` (
+${allColumnDefs.join(',\n')}
+) ENGINE=olap
+PRIMARY KEY(${pk})
+COMMENT ""
+DISTRIBUTED BY HASH(${pk}) BUCKETS 1
 PROPERTIES (
-  "replication_num" = "1",
-  "storage_format" = "DEFAULT"
+  "replication_num" = "1"
 );
 `;
   }
@@ -796,7 +844,7 @@ class MigrationScriptGenerator {
     this.extractor = new SchemaExtractor(config.database);
     this.typeMapper = new TypeMapper(config.typeMappings);
     this.flinkGenerator = new FlinkScriptGenerator(this.typeMapper, config.database, config.starRocks, config.flink);
-    this.starRocksGenerator = new StarRocksScriptGenerator(this.typeMapper);
+    this.starRocksGenerator = new StarRocksScriptGenerator(this.typeMapper, config.database.database);
     this.changeDetector = new SchemaChangeDetector();
   }
 
@@ -808,11 +856,17 @@ class MigrationScriptGenerator {
     const baseJobName = this.config.jobName || this.config.schema;
     const jobName = `${baseJobName}_${databaseName}`;
 
-    let starRocksScript = `-- StarRocks Table Definitions for ${this.config.schema}\n`;
+    // Database name with hyphens replaced by underscores
+    const starRocksDbName = databaseName.replace(/-/g, '_');
+
+    let starRocksScript = `-- ============================================================================\n`;
+    starRocksScript += `-- StarRocks Table Definitions for ${this.config.schema}\n`;
     if (this.config.jobName) {
       starRocksScript += `-- Job: ${this.config.jobName}\n`;
     }
-    starRocksScript += `\n`;
+    starRocksScript += `-- ============================================================================\n\n`;
+    starRocksScript += `-- Create database if not exists\n`;
+    starRocksScript += `CREATE DATABASE IF NOT EXISTS \`${starRocksDbName}\`;\n\n`;
 
     // Complete pipeline script
     let pipelineScript = this.flinkGenerator.generateJobConfig(jobName, databaseName);

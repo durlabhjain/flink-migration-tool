@@ -176,7 +176,7 @@ export class IOAnalyzer {
             readWriteRatio,
             rowCount: rowCountMap.get(row.TableName) || 0,
             lastActivity,
-            category: this.categorizeTable(totalIO, options),
+            category: this.categorizeTable(totalWrites, options),
           };
         });
       }

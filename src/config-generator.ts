@@ -10,6 +10,7 @@ import { TableIOStats, IOAnalysisReport } from './io-analyzer';
 interface SchemaConfig {
   database: {
     server: string;
+    serverHostname?: string;
     database: string;
     user: string;
     password: string;

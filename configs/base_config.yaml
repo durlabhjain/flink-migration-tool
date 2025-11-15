@@ -2,7 +2,8 @@
 # Auto-generated configs will inherit these settings
 
 database:
-  server: ""
+  server: ""  # IP address used for I/O analysis
+  serverHostname: ""  # Optional: Hostname for Flink CDC (if different from server)
   database: ""
   user: ""
   password: ""
@@ -22,7 +23,7 @@ schema: "dbo"
 # Optional: job name for organizing output
 jobName: ""
 
-# Flink checkpoint and savepoint configuration
+  # Flink checkpoint and savepoint configuration
 flink:
   checkpointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints"
   savepointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints"
@@ -33,7 +34,7 @@ global:
   columns:
     exclude:
       - "Version"
-      
+
   # Exclude specific tables from I/O analysis and job generation
   # These tables will not be included in any generated config files
   tables:
