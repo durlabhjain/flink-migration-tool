@@ -11,100 +11,21 @@ import { Command } from 'commander';
 import { glob } from 'glob';
 import { IOAnalyzer } from './io-analyzer';
 import { ConfigGenerator } from './config-generator';
-
-// ============================================================================
-// Configuration Types
-// ============================================================================
-
-interface DatabaseConfig {
-  server: string;              // IP address or hostname for I/O analysis
-  serverHostname?: string;     // Hostname for Flink CDC (optional)
-  database: string;
-  user: string;
-  password: string;
-  port?: number;
-  encrypt?: boolean;
-}
-
-interface StarRocksConfig {
-  feHost: string;           // Frontend host (e.g., 'starrocks.example.com' or '${STARROCKS_FE_HOST}')
-  database: string;          // Target database name (e.g., 'analytics' or '${STARROCKS_DATABASE}')
-  username: string;          // StarRocks username (e.g., 'root' or '${STARROCKS_USERNAME}')
-  password: string;          // StarRocks password (e.g., 'password' or '${STARROCKS_PASSWORD}')
-  jdbcPort?: number;         // JDBC port (default: 9030)
-  loadPort?: number;         // HTTP port for Stream Load (default: 8030)
-}
-
-interface TypeMapping {
-  sqlServer: string;
-  flink: string;
-  starRocks: string;
-  pattern?: string;
-}
-
-interface PatternConfig {
-  include?: string[];  // Regex patterns to include
-  exclude?: string[];  // Regex patterns to exclude
-}
-
-interface GlobalConfig {
-  tables?: PatternConfig;
-  columns?: PatternConfig;
-}
-
-interface TableOverride {
-  table: string;
-  primaryKey?: string[];
-  excludeColumns?: string[];
-  includeColumns?: string[];
-  customMappings?: Record<string, { flink?: string; starRocks?: string }>;
-}
-
-interface FlinkConfig {
-  checkpointDir: string;  // Base checkpoint directory
-  savepointDir: string;   // Base savepoint directory
-}
-
-interface SchemaConfig {
-  database: DatabaseConfig;
-  starRocks?: StarRocksConfig;  // Optional StarRocks connection config
-  schema: string;  // Schema name for this config file
-  global?: GlobalConfig;  // Global include/exclude patterns
-  tableOverrides?: TableOverride[];  // Per-table overrides
-  typeMappings?: TypeMapping[];
-  output: {
-    flinkPath: string;
-    starRocksPath: string;
-    checksumPath: string;
-  };
-  jobName?: string;  // Optional job name for multi-job organization
-  flink?: FlinkConfig;  // Optional Flink checkpoint/savepoint configuration
-}
-
-interface ColumnInfo {
-  name: string;
-  sqlServerType: string;
-  isNullable: boolean;
-  maxLength?: number;
-  precision?: number;
-  scale?: number;
-  isComputed?: boolean;
-  computedFormula?: string;
-}
-
-interface TableSchema {
-  schema: string;
-  table: string;
-  columns: ColumnInfo[];
-  primaryKey: string[];
-  checksum: string;
-  timestamp: string;
-}
-
-interface TableMetadata {
-  schema: string;
-  table: string;
-}
+import { resolveEnvVars } from './helper';
+import { PatternMatcher } from './pattern-matcher';
+import {
+  ColumnInfo,
+  DatabaseConfig,
+  StarRocksConfig,
+  TypeMapping,
+  PatternConfig,
+  TableOverride,
+  FlinkConfig,
+  SchemaConfig,
+  TableSchema,
+  TableMetadata,
+} from './types';
+import * as SqlConverter from './sql-formula-converter';
 
 // ============================================================================
 // Default Type Mappings
@@ -158,78 +79,6 @@ const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
 ];
 
 const VARCHAR_MAX_LENGTH = 65535;
-
-// ============================================================================
-// Utility Functions
-// ============================================================================
-
-/**
- * Resolves environment variable placeholders in config values
- * Supports ${VAR_NAME} syntax
- * Example: "${STARROCKS_HOST}" -> "starrocks.example.com"
- */
-function resolveEnvVars(value: string): string {
-  return value.replace(/\$\{([^}]+)\}/g, (match, envVar) => {
-    const envValue = process.env[envVar];
-    if (envValue === undefined) {
-      console.warn(`⚠️  Environment variable ${envVar} is not set, using placeholder: ${match}`);
-      return match;
-    }
-    return envValue;
-  });
-}
-
-// ============================================================================
-// Pattern Matcher
-// ============================================================================
-
-class PatternMatcher {
-  static matches(value: string, patterns?: string[]): boolean {
-    if (!patterns || patterns.length === 0) return true;
-    
-    return patterns.some(pattern => {
-      // Exact match - if pattern has no wildcards, require exact match
-      if (!pattern.includes('*') && !pattern.includes('?')) {
-        return value.toLowerCase() === pattern.toLowerCase();
-      }
-      
-      try {
-        // Convert glob pattern to regex
-        const regexPattern = pattern
-          .replace(/[.+^${}()|[\]\\]/g, '\\$&') // Escape special regex chars
-          .replace(/\*/g, '.*')  // * matches any characters
-          .replace(/\?/g, '.');  // ? matches single character
-        
-        const regex = new RegExp(`^${regexPattern}$`, 'i');
-        return regex.test(value);
-      } catch (error) {
-        console.warn(`Invalid regex pattern: ${pattern}`);
-        return false;
-      }
-    });
-  }
-
-  static shouldInclude(
-    value: string,
-    includePatterns?: string[],
-    excludePatterns?: string[]
-  ): boolean {
-    // If exclude patterns exist and match, exclude
-    if (excludePatterns && excludePatterns.length > 0) {
-      if (this.matches(value, excludePatterns)) {
-        return false;
-      }
-    }
-
-    // If include patterns exist, must match at least one
-    if (includePatterns && includePatterns.length > 0) {
-      return this.matches(value, includePatterns);
-    }
-
-    // No include patterns specified, include by default (unless excluded above)
-    return true;
-  }
-}
 
 // ============================================================================
 // Schema Extractor
@@ -713,482 +562,63 @@ class StarRocksScriptGenerator {
   constructor(private typeMapper: TypeMapper, private databaseName: string) {}
 
   /**
-   * Fix column name casing in formulas to match actual column names
-   * StarRocks is case-sensitive, but MSSQL formulas may have inconsistent casing
+   * Extract computed column information for ALTER statement generation
    */
-  private fixColumnNameCasing(formula: string, columns: ColumnInfo[]): string {
-    let result = formula;
+  extractComputedColumns(tableSchema: TableSchema, override?: TableOverride): Array<{
+    schema: string;
+    table: string;
+    column: ColumnInfo;
+    convertedFormula: string;
+    inferredType: string;
+  }> {
+    let columns = [...tableSchema.columns];
 
-    // For each column, find references to it (with backticks) and fix the casing
-    for (const col of columns) {
-      // Match `columnname` in any case and replace with correct case
-      const regex = new RegExp(`\`${col.name}\``, 'gi');
-      result = result.replace(regex, `\`${col.name}\``);
+    // Apply column filters from override
+    if (override) {
+      if (override.excludeColumns && override.excludeColumns.length > 0) {
+        columns = columns.filter(col => !override.excludeColumns!.includes(col.name));
+      }
+      if (override.includeColumns && override.includeColumns.length > 0) {
+        columns = columns.filter(col => override.includeColumns!.includes(col.name));
+      }
+    }
+
+    const computedColumns = columns.filter(col => col.isComputed);
+    const result: Array<{
+      schema: string;
+      table: string;
+      column: ColumnInfo;
+      convertedFormula: string;
+      inferredType: string;
+    }> = [];
+
+    for (const col of computedColumns) {
+      const formula = col.computedFormula || '';
+      let convertedFormula = SqlConverter.convertMSSQLFormulaToMySQL(formula);
+      convertedFormula = SqlConverter.fixColumnNameCasing(convertedFormula, columns);
+
+      // Remove excessive outer wrapping parentheses
+      while (convertedFormula.startsWith('((') && convertedFormula.endsWith('))')) {
+        const inner = convertedFormula.substring(1, convertedFormula.length - 1);
+        if (inner.startsWith('(') && inner.endsWith(')')) {
+          convertedFormula = inner;
+        } else {
+          break;
+        }
+      }
+
+      const inferredType = SqlConverter.inferComputedColumnType(col, convertedFormula);
+
+      result.push({
+        schema: tableSchema.schema,
+        table: tableSchema.table,
+        column: col,
+        convertedFormula,
+        inferredType,
+      });
     }
 
     return result;
-  }
-
-  /**
-   * Convert + operators to CONCAT() for string concatenation
-   * This properly handles nested expressions and avoids breaking CASE statements
-   */
-  private convertPlusToConcat(str: string): string {
-    let result = str;
-    let changed = true;
-    let iterations = 0;
-
-    while (changed && iterations < 25) {
-      const before = result;
-
-      // Match common function patterns and literals
-      const funcPattern = '(?:nullif|ifnull|coalesce|trim|concat)\\s*\\([^)]+\\)';
-      const casePattern = 'case\\s+when[\\s\\S]+?end';
-      const literalPattern = '(?:`[^`]+`|\'[^\']+\')';
-
-      // Build expression pattern - match functions, case, literals, or column names
-      const exprPattern = `(?:${funcPattern}|${casePattern}|${literalPattern})`;
-
-      // Pattern 1: function/case/literal + function/case/literal
-      const regex1 = new RegExp(`(${exprPattern})\\s*\\+\\s*(${exprPattern})`, 'gi');
-      result = result.replace(regex1, (_match, left, right) => `CONCAT(${left}, ${right})`);
-
-      // Pattern 2: CONCAT(...) + expr (including simple column names with backticks)
-      result = result.replace(
-        /CONCAT\(([^)]+)\)\s*\+\s*(`[^`]+`|'[^']+'|[a-zA-Z_][a-zA-Z0-9_]*)/gi,
-        (_match, args, right) => `CONCAT(${args}, ${right})`
-      );
-
-      // Pattern 3: expr + CONCAT(...)
-      const regex3 = new RegExp(`(${exprPattern})\\s*\\+\\s*CONCAT\\(([^)]+)\\)`, 'gi');
-      result = result.replace(regex3, (_match, left, args) => `CONCAT(${left}, ${args})`);
-
-      // Pattern 4: Match )) + function where we're clearly inside nested parens
-      // Only safe to replace if we see the pattern with extra closing parens before
-      // Don't do blanket ) + replacement as it can create syntax errors
-
-      // Pattern 5: Catch any remaining CONCAT(...) patterns followed by + column
-      // This needs to extend the CONCAT, not just add a comma
-      result = result.replace(
-        /CONCAT\(([^)]+)\)\s*\)\s*\+\s*`([^`]+)`/g,
-        (_match, args, colName) => `CONCAT(${args}, \`${colName}\`))`
-      );
-
-      changed = (before !== result);
-      iterations++;
-    }
-
-    // Final cleanup: If there are still any + operators remaining, it's an error
-    // Log a warning or throw
-    if (result.includes('+') && !result.toLowerCase().includes('interval')) {
-      // Last resort: Try to fix simple cases of CONCAT...)) + expr
-      result = result.replace(
-        /CONCAT\(([^)]+(?:\([^)]*\)[^)]*)*)\)\s*\)\s*\+\s*([^)]+)\)/g,
-        'CONCAT($1, $2))'
-      );
-    }
-
-    // Remove one layer of excessive wrapping parentheses around entire expression
-    // MSSQL often adds extra wrapping: (((expr))) -> ((expr))
-    // But only if the pattern looks like it's wrapping the whole thing
-    result = result.replace(/^\({3,}(CONCAT\(.+\))\){3,}$/g, '(($1))');
-
-    // Simpler fix: just reduce )))) to )))
-    result = result.replace(/\){4}/g, ')))');
-
-    return result;
-  }
-
-  /**
-   * Converts MSSQL computed column formula to MySQL/StarRocks compatible syntax
-   */
-  private convertMSSQLFormulaToMySQL(formula: string): string {
-    if (!formula) return '';
-
-    let converted = formula;
-
-    // STEP 1: Remove MSSQL brackets around column names: [ColumnName] -> `ColumnName`
-    // Also handles schema prefixes like [dbo].[FunctionName]
-    converted = converted.replace(/\[([^\]]+)\]/g, '`$1`');
-
-    // STEP 2: Convert simple date/time functions FIRST (before complex ones)
-    // Convert GETDATE() to NOW()
-    converted = converted.replace(/\bgetdate\s*\(\s*\)/gi, 'NOW()');
-
-    // Convert GETUTCDATE() to UTC_TIMESTAMP()
-    converted = converted.replace(/\bgetutcdate\s*\(\s*\)/gi, 'UTC_TIMESTAMP()');
-
-    // STEP 3 & 4: Convert DATEADD and DATEDIFF with proper parentheses matching
-    // Run multiple passes to handle nested function calls
-    // MSSQL: DATEADD(minute, value, date) -> MySQL: DATE_ADD(date, INTERVAL value MINUTE)
-    // MSSQL: DATEDIFF(minute, start, end) -> MySQL: TIMESTAMPDIFF(MINUTE, start, end)
-    let prevDateConverted = '';
-    let dateIterations = 0;
-    const maxDateIterations = 5;
-
-    while (prevDateConverted !== converted && dateIterations < maxDateIterations) {
-      prevDateConverted = converted;
-      converted = this.replaceDateAdd(converted);
-      converted = this.replaceDateDiff(converted);
-      dateIterations++;
-    }
-
-    // STEP 5: Convert other NULL and string functions
-    // Convert ISNULL(a, b) to IFNULL(a, b)
-    converted = converted.replace(/\bisnull\s*\(/gi, 'IFNULL(');
-
-    // Convert LEN() to CHAR_LENGTH()
-    converted = converted.replace(/\blen\s*\(/gi, 'CHAR_LENGTH(');
-
-    // Convert RTRIM() to TRIM()
-    converted = converted.replace(/\brtrim\s*\(/gi, 'TRIM(');
-
-    // Convert LTRIM() to TRIM()
-    converted = converted.replace(/\bltrim\s*\(/gi, 'TRIM(');
-
-    // ISJSON() - StarRocks doesn't have a direct equivalent that works on VARCHAR
-    // JSON_VALID() only works on JSON type columns, not VARCHAR
-    // As a workaround, we'll check if the string starts with '{' or '['
-    // ISJSON(column) -> IF(column REGEXP '^[\\{\\[]', 1, 0)
-    converted = converted.replace(/\bisjson\s*\(([^)]+)\)/gi, (_match, arg) => {
-      return `IF(${arg.trim()} REGEXP '^[\\\\{\\\\[]', 1, 0)`;
-    });
-
-    // STEP 6: Convert CONVERT for type conversions (using proper matching)
-    converted = this.replaceConvert(converted);
-
-    // STEP 7: Convert CHECKSUM() - StarRocks doesn't have direct equivalent
-    // Use CRC32() or MD5() as approximation
-    // CHECKSUM(col1, col2, ...) -> CRC32(CONCAT(col1, col2, ...))
-    converted = converted.replace(
-      /\bchecksum\s*\(([^)]+)\)/gi,
-      (_match, args) => {
-        return `CRC32(CONCAT_WS(',', ${args}))`;
-      }
-    );
-
-    // STEP 8: Convert string concatenation + to CONCAT()
-    // StarRocks does NOT support + for string concatenation
-    // Use a helper function to properly parse and convert
-    converted = this.convertPlusToConcat(converted);
-
-    // Handle user-defined functions (UDF) - these need to be replaced or removed
-    // Common pattern: [dbo].[FunctionName](args) or dbo.FunctionName(args)
-    // Add a comment indicating manual review needed
-    if (converted.match(/`dbo`\.`\w+`\s*\(/i)) {
-      console.warn('Warning: User-defined functions detected in computed columns. Manual review may be required.');
-    }
-
-    return converted;
-  }
-
-  /**
-   * Helper function to match and extract content within balanced parentheses
-   * startIdx should point to the position RIGHT AFTER the opening parenthesis
-   */
-  private findMatchingParen(str: string, startIdx: number): number {
-    let depth = 1;  // We've already passed one opening parenthesis
-    for (let i = startIdx; i < str.length; i++) {
-      if (str[i] === '(') depth++;
-      else if (str[i] === ')') {
-        depth--;
-        if (depth === 0) return i;
-      }
-    }
-    return -1;
-  }
-
-  /**
-   * Replace DATEADD with proper handling of nested parentheses
-   */
-  private replaceDateAdd(str: string): string {
-    const regex = /\bdateadd\s*\(/gi;
-    let result = '';
-    let lastIndex = 0;
-    let match;
-
-    while ((match = regex.exec(str)) !== null) {
-      const startIdx = match.index + match[0].length;
-      const endIdx = this.findMatchingParen(str, startIdx);
-
-      if (endIdx !== -1) {
-        const args = str.substring(startIdx, endIdx);
-        const parts = this.splitByComma(args);
-
-        if (parts.length === 3) {
-          const unit = parts[0].trim().toUpperCase();
-          let value = parts[1].trim();
-          const date = parts[2].trim();
-
-          // Remove outer parentheses from value if present (e.g., "(-30)" -> "-30")
-          value = value.replace(/^\(([^()]+)\)$/, '$1');
-
-          result += str.substring(lastIndex, match.index);
-          result += `DATE_ADD(${date}, INTERVAL ${value} ${unit})`;
-          lastIndex = endIdx + 1;
-        }
-      }
-    }
-
-    result += str.substring(lastIndex);
-    return result;
-  }
-
-  /**
-   * Replace DATEDIFF with proper handling of nested parentheses
-   */
-  private replaceDateDiff(str: string): string {
-    const regex = /\bdatediff\s*\(/gi;
-    let result = '';
-    let lastIndex = 0;
-    let match;
-
-    while ((match = regex.exec(str)) !== null) {
-      const startIdx = match.index + match[0].length;
-      const endIdx = this.findMatchingParen(str, startIdx);
-
-      if (endIdx !== -1) {
-        const args = str.substring(startIdx, endIdx);
-        const parts = this.splitByComma(args);
-
-        if (parts.length === 3) {
-          const unit = parts[0].trim().toUpperCase();
-          const start = parts[1].trim();
-          const end = parts[2].trim();
-
-          result += str.substring(lastIndex, match.index);
-          result += `TIMESTAMPDIFF(${unit}, ${start}, ${end})`;
-          lastIndex = endIdx + 1;
-        }
-      }
-    }
-
-    result += str.substring(lastIndex);
-    return result;
-  }
-
-  /**
-   * Replace CONVERT with proper handling of nested parentheses
-   */
-  private replaceConvert(str: string): string {
-    const regex = /\bconvert\s*\(/gi;
-    let result = '';
-    let lastIndex = 0;
-    let match;
-
-    while ((match = regex.exec(str)) !== null) {
-      const startIdx = match.index + match[0].length;
-      const endIdx = this.findMatchingParen(str, startIdx);
-
-      if (endIdx !== -1) {
-        const args = str.substring(startIdx, endIdx);
-        const parts = this.splitByComma(args);
-
-        if (parts.length >= 2) {
-          const typeStr = parts[0].trim().replace(/`/g, '');
-          const value = parts[1].trim();
-
-          // Parse type (e.g., "varchar(10)" or "decimal(18,2)")
-          const typeMatch = typeStr.match(/^(\w+)(?:\(([^)]+)\))?/);
-          if (typeMatch) {
-            const lowerType = typeMatch[1].toLowerCase();
-            const typeParams = typeMatch[2];
-            let mysqlType = lowerType;
-
-            if (lowerType === 'varchar') {
-              mysqlType = typeParams ? `CHAR(${typeParams})` : 'CHAR';
-            } else if (lowerType === 'bit') {
-              // MSSQL bit (0/1) -> StarRocks TINYINT
-              mysqlType = 'TINYINT';
-            } else if (lowerType === 'decimal' || lowerType === 'numeric') {
-              mysqlType = typeParams ? `DECIMAL(${typeParams})` : 'DECIMAL';
-            } else if (lowerType === 'date') {
-              mysqlType = 'DATE';
-            } else if (lowerType === 'datetime') {
-              mysqlType = 'DATETIME';
-            } else if (lowerType === 'int') {
-              mysqlType = 'SIGNED';
-            } else if (lowerType === 'bigint') {
-              mysqlType = 'SIGNED';
-            } else if (lowerType === 'varbinary') {
-              mysqlType = 'BINARY';
-            }
-
-            result += str.substring(lastIndex, match.index);
-            result += `CAST(${value} AS ${mysqlType})`;
-            lastIndex = endIdx + 1;
-          }
-        }
-      }
-    }
-
-    result += str.substring(lastIndex);
-    return result;
-  }
-
-  /**
-   * Split string by comma, but respect nested parentheses
-   */
-  private splitByComma(str: string): string[] {
-    const parts: string[] = [];
-    let current = '';
-    let depth = 0;
-
-    for (let i = 0; i < str.length; i++) {
-      const char = str[i];
-      if (char === '(') {
-        depth++;
-        current += char;
-      } else if (char === ')') {
-        depth--;
-        current += char;
-      } else if (char === ',' && depth === 0) {
-        parts.push(current);
-        current = '';
-      } else {
-        current += char;
-      }
-    }
-
-    if (current) {
-      parts.push(current);
-    }
-
-    return parts;
-  }
-
-  /**
-   * Infer the StarRocks data type for a computed column based on its formula and original MSSQL type
-   */
-  private inferComputedColumnType(col: ColumnInfo, formula: string): string {
-    // For computed columns, analyze the formula FIRST because StarRocks computes the actual type
-    // and may be stricter than MSSQL about type matching
-    const lowerFormula = formula.toLowerCase();
-
-    // Check for CASE expressions - the result type is determined by the THEN/ELSE values, not the condition
-    if (lowerFormula.includes('case when')) {
-      // If ALL THEN/ELSE return values are literal 0 or 1, the result is TINYINT
-      // This is true even if TIMESTAMPDIFF is used in the WHEN condition
-      const thenMatches = formula.match(/then\s*\(?\s*([01])\s*\)?/gi);
-      const elseMatches = formula.match(/else\s*\(?\s*([01])\s*\)?/gi);
-
-      if (thenMatches && elseMatches) {
-        // Both then and else return literal 0 or 1 → TINYINT
-        return 'TINYINT';
-      }
-    }
-
-    // Check for TIMESTAMPDIFF outside of CASE expressions - it returns BIGINT
-    if (lowerFormula.includes('timestampdiff') || lowerFormula.includes('datediff')) {
-      // TIMESTAMPDIFF used directly (not in CASE returning literals)
-      return 'BIGINT';
-    }
-
-    // Then try to infer from the MSSQL type if available (as a fallback)
-    if (col.sqlServerType) {
-      const lowerType = col.sqlServerType.toLowerCase();
-
-      // Map common MSSQL types to StarRocks types
-      if (lowerType.includes('bit')) return 'BOOLEAN';
-      if (lowerType.includes('tinyint')) return 'TINYINT';
-      if (lowerType.includes('smallint')) return 'SMALLINT';
-      if (lowerType.includes('int')) return 'INT';
-      if (lowerType.includes('bigint')) return 'BIGINT';
-      if (lowerType.includes('decimal') || lowerType.includes('numeric')) {
-        if (col.precision && col.scale !== undefined) {
-          return `DECIMAL(${col.precision},${col.scale})`;
-        }
-        return 'DECIMAL(18,2)';
-      }
-      if (lowerType.includes('float')) return 'DOUBLE';
-      if (lowerType.includes('real')) return 'FLOAT';
-      if (lowerType.includes('date') && !lowerType.includes('time')) return 'DATE';
-      if (lowerType.includes('datetime') || lowerType.includes('datetime2')) return 'DATETIME';
-      if (lowerType.includes('varchar') || lowerType.includes('nvarchar')) {
-        if (col.maxLength && col.maxLength > 0 && col.maxLength < 65535) {
-          return `VARCHAR(${col.maxLength})`;
-        }
-        return 'VARCHAR(65535)';
-      }
-      if (lowerType.includes('char')) return 'VARCHAR(255)';
-      if (lowerType.includes('text')) return 'VARCHAR(65535)';
-    }
-
-    // If no type info, infer from the formula pattern
-    // (lowerFormula already declared at the top of the function)
-
-    // Check for date/time functions
-    if (lowerFormula.includes('timestampdiff') || lowerFormula.includes('datediff')) {
-      return 'BIGINT'; // TIMESTAMPDIFF returns BIGINT
-    }
-    if (lowerFormula.includes('date_add') || lowerFormula.includes('dateadd')) {
-      return 'DATETIME';
-    }
-    if (lowerFormula.includes('now()') || lowerFormula.includes('utc_timestamp()')) {
-      return 'DATETIME';
-    }
-    if (lowerFormula.includes('cast') && lowerFormula.includes('as date')) {
-      return 'DATE';
-    }
-    if (lowerFormula.includes('cast') && lowerFormula.includes('as datetime')) {
-      return 'DATETIME';
-    }
-
-    // Check for string functions
-    if (lowerFormula.includes('concat') || lowerFormula.includes('trim') ||
-        lowerFormula.includes('replace') || lowerFormula.includes('substring')) {
-      return 'VARCHAR(65535)';
-    }
-
-    // Check for numeric operations
-    if (lowerFormula.includes('cast') && lowerFormula.includes('as decimal')) {
-      const match = lowerFormula.match(/decimal\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)/);
-      if (match) {
-        return `DECIMAL(${match[1]},${match[2]})`;
-      }
-      return 'DECIMAL(18,2)';
-    }
-    if (lowerFormula.includes('cast') && lowerFormula.includes('as signed')) {
-      return 'BIGINT';
-    }
-    if (lowerFormula.includes('cast') && lowerFormula.includes('as unsigned')) {
-      return 'BIGINT';
-    }
-
-    // Check for CASE expressions - try to infer from common patterns
-    if (lowerFormula.includes('case when')) {
-      // If returns 0 or 1, it's likely a boolean/tinyint
-      if (lowerFormula.match(/then\s*\(?\s*[01]\s*\)?/)) {
-        return 'TINYINT';
-      }
-      // If returns numeric values
-      if (lowerFormula.match(/then\s*\(?\s*-?\d+\s*\)?/)) {
-        return 'INT';
-      }
-      // If returns strings
-      if (lowerFormula.match(/then\s*['"`]/)) {
-        return 'VARCHAR(255)';
-      }
-    }
-
-    // Check for CRC32, checksum functions
-    if (lowerFormula.includes('crc32')) {
-      return 'BIGINT';
-    }
-
-    // Check for IF function with REGEXP (converted from ISJSON)
-    // IF(column REGEXP ..., 1, 0) returns TINYINT
-    if (lowerFormula.includes('if(') && lowerFormula.includes('regexp')) {
-      return 'TINYINT';
-    }
-
-    // Default fallback based on common patterns
-    if (lowerFormula.match(/^\s*\(?\s*\d+\s*\)?/)) {
-      return 'INT'; // Starts with a number
-    }
-
-    // Default to VARCHAR for string-like expressions
-    return 'VARCHAR(255)';
   }
 
   generate(tableSchema: TableSchema, override?: TableOverride): string {
@@ -1221,11 +651,11 @@ class StarRocksScriptGenerator {
     // StarRocks requires explicit type definitions for computed columns
     const computedColumnDefs = computedColumns.map(col => {
       const formula = col.computedFormula || '';
-      let convertedFormula = this.convertMSSQLFormulaToMySQL(formula);
+      let convertedFormula = SqlConverter.convertMSSQLFormulaToMySQL(formula);
 
       // Fix column name casing - StarRocks is case-sensitive
       // Replace column references with the correct case from the actual column names
-      convertedFormula = this.fixColumnNameCasing(convertedFormula, columns);
+      convertedFormula = SqlConverter.fixColumnNameCasing(convertedFormula, columns);
 
       // Remove excessive outer wrapping parentheses from MSSQL formulas
       // MSSQL often wraps formulas in ((...)), we only need one layer since we add () in template
@@ -1240,7 +670,7 @@ class StarRocksScriptGenerator {
       }
 
       // Infer the type from the computed formula or use a default type
-      const inferredType = this.inferComputedColumnType(col, convertedFormula);
+      const inferredType = SqlConverter.inferComputedColumnType(col, convertedFormula);
 
       // StarRocks syntax: column_name type AS (expression)
       return `  \`${col.name}\` ${inferredType} AS (${convertedFormula})`;
@@ -1355,12 +785,85 @@ class MigrationScriptGenerator {
   private starRocksGenerator: StarRocksScriptGenerator;
   private changeDetector: SchemaChangeDetector;
 
+  // Static property to collect all computed columns across all generators
+  private static globalComputedColumns: Array<{
+    schema: string;
+    table: string;
+    column: ColumnInfo;
+    convertedFormula: string;
+    inferredType: string;
+    jobName: string;
+  }> = [];
+
   constructor(private config: SchemaConfig) {
     this.extractor = new SchemaExtractor(config.database);
     this.typeMapper = new TypeMapper(config.typeMappings);
     this.flinkGenerator = new FlinkScriptGenerator(this.typeMapper, config.database, config.starRocks, config.flink);
     this.starRocksGenerator = new StarRocksScriptGenerator(this.typeMapper, config.database.database);
     this.changeDetector = new SchemaChangeDetector();
+  }
+
+  /**
+   * Reset the global computed columns collection
+   */
+  static resetGlobalComputedColumns(): void {
+    MigrationScriptGenerator.globalComputedColumns = [];
+  }
+
+  /**
+   * Generate a single MSSQL ALTER statements file for all computed columns
+   */
+  static generateGlobalComputedColumnsFile(outputDir: string): string | null {
+    if (MigrationScriptGenerator.globalComputedColumns.length === 0) {
+      return null;
+    }
+
+    let computedColumnsScript = `-- ============================================================================\n`;
+    computedColumnsScript += `-- MSSQL ALTER Statements for All Computed Columns\n`;
+    computedColumnsScript += `-- ============================================================================\n`;
+    computedColumnsScript += `-- IMPORTANT: This script contains ALTER statements in MSSQL format\n`;
+    computedColumnsScript += `-- Execute this script in SQL Server Management Studio (SSMS)\n`;
+    computedColumnsScript += `-- These statements add computed columns to MSSQL tables\n`;
+    computedColumnsScript += `--\n`;
+    computedColumnsScript += `-- Generated: ${new Date().toISOString()}\n`;
+    computedColumnsScript += `-- Total Computed Columns: ${MigrationScriptGenerator.globalComputedColumns.length}\n`;
+    computedColumnsScript += `-- ============================================================================\n\n`;
+
+    // Group by table
+    const columnsByTable = new Map<string, typeof MigrationScriptGenerator.globalComputedColumns>();
+    for (const col of MigrationScriptGenerator.globalComputedColumns) {
+      const tableKey = `${col.schema}.${col.table}`;
+      if (!columnsByTable.has(tableKey)) {
+        columnsByTable.set(tableKey, []);
+      }
+      columnsByTable.get(tableKey)!.push(col);
+    }
+
+    // Generate ALTER statements for each table
+    for (const [tableKey, columns] of columnsByTable) {
+      computedColumnsScript += `-- ============================================================================\n`;
+      computedColumnsScript += `-- Table: ${tableKey}\n`;
+      computedColumnsScript += `-- Computed Columns: ${columns.length}\n`;
+      computedColumnsScript += `-- Jobs: ${[...new Set(columns.map(c => c.jobName))].join(', ')}\n`;
+      computedColumnsScript += `-- ============================================================================\n\n`;
+
+      for (const col of columns) {
+        // Use the original MSSQL formula from the column
+        const mssqlFormula = col.column.computedFormula || '';
+
+        computedColumnsScript += `-- Column: ${col.column.name}\n`;
+        computedColumnsScript += `-- Type: ${col.column.sqlServerType}\n`;
+        computedColumnsScript += `-- Job: ${col.jobName}\n`;
+        computedColumnsScript += `ALTER TABLE [${col.schema}].[${col.table}]\n`;
+        computedColumnsScript += `ADD [${col.column.name}] AS ${mssqlFormula};\n`;
+        computedColumnsScript += `GO\n\n`;
+      }
+    }
+
+    const computedColumnsFile = path.join(outputDir, 'all_computed_columns_mssql.sql');
+    fs.writeFileSync(computedColumnsFile, computedColumnsScript);
+
+    return computedColumnsFile;
   }
 
   async generate(detectChanges: boolean = false): Promise<void> {
@@ -1382,6 +885,15 @@ class MigrationScriptGenerator {
     starRocksScript += `-- ============================================================================\n\n`;
     starRocksScript += `-- Create database if not exists\n`;
     starRocksScript += `CREATE DATABASE IF NOT EXISTS \`${starRocksDbName}\`;\n\n`;
+
+    // Array to track all computed columns for ALTER statement generation
+    const allComputedColumns: Array<{
+      schema: string;
+      table: string;
+      column: ColumnInfo;
+      convertedFormula: string;
+      inferredType: string;
+    }> = [];
 
     // Complete pipeline script
     let pipelineScript = this.flinkGenerator.generateJobConfig(jobName, databaseName);
@@ -1450,6 +962,18 @@ class MigrationScriptGenerator {
       tableSchemas.push({ schema, override });
 
       starRocksScript += this.starRocksGenerator.generate(schema, override) + '\n';
+
+      // Extract computed columns for global ALTER statement generation
+      const computedCols = this.starRocksGenerator.extractComputedColumns(schema, override);
+      allComputedColumns.push(...computedCols);
+
+      // Add to global collection with job name
+      for (const col of computedCols) {
+        MigrationScriptGenerator.globalComputedColumns.push({
+          ...col,
+          jobName,
+        });
+      }
 
       // Detect changes if requested
       if (detectChanges) {
@@ -1533,6 +1057,9 @@ class MigrationScriptGenerator {
     console.log(`   Flink CDC Pipeline: ${flinkFile}`);
     console.log(`   StarRocks DDL: ${starRocksFile}`);
     console.log(`   Checksums: ${checksumFile}`);
+    if (allComputedColumns.length > 0) {
+      console.log(`   Computed Columns in this job: ${allComputedColumns.length}`);
+    }
   }
 }
 
@@ -1560,8 +1087,20 @@ program
         ? yaml.load(configContent) as SchemaConfig
         : JSON.parse(configContent);
 
+      // Reset global computed columns collection
+      MigrationScriptGenerator.resetGlobalComputedColumns();
+
       const generator = new MigrationScriptGenerator(config);
       await generator.generate(options.detectChanges);
+
+      // Generate single file with computed columns
+      const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(config.output.starRocksPath);
+
+      if (computedColumnsFile) {
+        console.log(`\n📝 Computed Columns Summary:`);
+        console.log(`   All Computed Columns (MSSQL): ${computedColumnsFile}`);
+        console.log(`   Total Computed Columns: ${MigrationScriptGenerator['globalComputedColumns'].length}`);
+      }
     } catch (error) {
       console.error('❌ Error:', error);
       process.exit(1);
@@ -1585,6 +1124,12 @@ program
 
       console.log(`\n🚀 Found ${configFiles.length} schema configuration(s)\n`);
 
+      // Reset global computed columns collection
+      MigrationScriptGenerator.resetGlobalComputedColumns();
+
+      // Determine output directory from first config file
+      let starRocksOutputDir: string | null = null;
+
       for (const configFile of configFiles) {
         console.log(`\n${'='.repeat(80)}`);
         console.log(`Processing: ${path.basename(configFile)}`);
@@ -1595,8 +1140,24 @@ program
           ? JSON.parse(configContent)
           : yaml.load(configContent) as SchemaConfig;
 
+        // Store the output directory from the first config
+        if (!starRocksOutputDir) {
+          starRocksOutputDir = config.output.starRocksPath;
+        }
+
         const generator = new MigrationScriptGenerator(config);
         await generator.generate(options.detectChanges);
+      }
+
+      // Generate single file with all computed columns
+      if (starRocksOutputDir) {
+        const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(starRocksOutputDir);
+
+        if (computedColumnsFile) {
+          console.log(`\n\n📝 Computed Columns Summary:`);
+          console.log(`   All Computed Columns (MSSQL): ${computedColumnsFile}`);
+          console.log(`   Total Computed Columns: ${MigrationScriptGenerator['globalComputedColumns'].length}`);
+        }
       }
 
       console.log(`\n\n✅ All schemas processed successfully!`);
