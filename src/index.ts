@@ -508,6 +508,7 @@ ${columnDefs.join(',\n')}${pk}
 -- Organize checkpoints and savepoints by job name
 SET 'state.checkpointing.dir' = '${fullCheckpointDir}';
 SET 'state.savepoints.dir' = '${fullSavepointDir}';
+SET 'pipeline.name' = '${jobName}';
 
 -- ===== OPTIONAL: Job-Specific Checkpoint Interval =====
 -- Cluster default is 30s. Uncomment to override for this job:
