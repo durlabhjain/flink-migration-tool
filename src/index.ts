@@ -447,8 +447,8 @@ ${columnDefs.join(',\n')}${pk}
 
   generateInsertStatement(tableSchema: TableSchema, override?: TableOverride): string {
     const database = resolveEnvVars(this.databaseConfig.database);
-    const sourceTableName = `default_catalog.\`${database}\`.\`${tableSchema.schema}.${tableSchema.table}_mssql\``;
-    const sinkTableName = `default_catalog.\`${database}\`.\`${tableSchema.schema}.${tableSchema.table}_sink\``;
+    const sourceTableName = `\`default_catalog\`.\`${database}\`.\`${tableSchema.schema}.${tableSchema.table}_mssql\``;
+    const sinkTableName = `\`default_catalog\`.\`${database}\`.\`${tableSchema.schema}.${tableSchema.table}_sink\``;
 
     // Apply column filters from override (same logic as in generate() and generateStarRocksSink())
     let columns = [...tableSchema.columns];
