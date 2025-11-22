@@ -327,6 +327,8 @@ class FlinkScriptGenerator {
 -- Checksum: ${tableSchema.checksum}
 -- ============================================================================
 
+CREATE DATABASE IF NOT EXISTS \`default_catalog\`.\`${database}\`;
+
 CREATE TABLE IF NOT EXISTS \`default_catalog\`.\`${database}\`.\`${fullTableName}\` (
 ${columnDefs.join(',\n')}${pk}
 ) WITH (
@@ -339,7 +341,7 @@ ${columnDefs.join(',\n')}${pk}
   'table-name' = 'dbo.${tableSchema.table}',
 
   -- CDC Configuration
-  'scan.incremental.snapshot.enabled' = 'true',
+  'scan.incremental.snapshot.enabled' = 'false',
   'scan.incremental.snapshot.chunk.size' = '8096',
   'scan.snapshot.fetch.size' = '1024',
   'connect.timeout' = '30s',
