@@ -508,7 +508,7 @@ ${columnDefs.join(',\n')}${pk}
 
 -- ===== Job-Specific Storage Paths =====
 -- Organize checkpoints and savepoints by job name
-SET 'state.checkpointing.dir' = '${fullCheckpointDir}';
+SET 'state.checkpoints.dir' = '${fullCheckpointDir}';
 SET 'state.savepoints.dir' = '${fullSavepointDir}';
 SET 'pipeline.name' = '${jobName}';
 
