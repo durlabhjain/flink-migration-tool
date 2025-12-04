@@ -34,52 +34,107 @@ export function convertPlusToConcat(str: string): string {
   while (changed && iterations < 25) {
     const before = result;
 
-    // Match common function patterns and literals
-    const funcPattern = '(?:nullif|ifnull|coalesce|trim|concat)\\s*\\([^)]+\\)';
-    const casePattern = 'case\\s+when[\\s\\S]+?end';
-    const literalPattern = '(?:`[^`]+`|\'[^\']+\')';
+    // First, simplify parentheses around simple expressions
+    // (CONCAT(...)) + expr -> CONCAT(...) + expr
+    result = result.replace(/\((CONCAT\([^)]+\))\)\s*\+/g, '$1+');
+    result = result.replace(/\+\s*\((CONCAT\([^)]+\))\)/g, '+$1');
 
-    // Build expression pattern - match functions, case, literals, or column names
-    const exprPattern = `(?:${funcPattern}|${casePattern}|${literalPattern})`;
-
-    // Pattern 1: function/case/literal + function/case/literal
-    const regex1 = new RegExp(`(${exprPattern})\\s*\\+\\s*(${exprPattern})`, 'gi');
-    result = result.replace(regex1, (_match, left, right) => `CONCAT(${left}, ${right})`);
-
-    // Pattern 2: CONCAT(...) + expr (including simple column names with backticks)
+    // Pattern 1: literal + column or column + literal
     result = result.replace(
-      /CONCAT\(([^)]+)\)\s*\+\s*(`[^`]+`|'[^']+'|[a-zA-Z_][a-zA-Z0-9_]*)/gi,
-      (_match, args, right) => `CONCAT(${args}, ${right})`
+      /'([^']+)'\s*\+\s*`([^`]+)`/g,
+      (_match, lit, col) => `CONCAT('${lit}', \`${col}\`)`
+    );
+    result = result.replace(
+      /`([^`]+)`\s*\+\s*'([^']+)'/g,
+      (_match, col, lit) => `CONCAT(\`${col}\`, '${lit}')`
     );
 
-    // Pattern 3: expr + CONCAT(...)
-    const regex3 = new RegExp(`(${exprPattern})\\s*\\+\\s*CONCAT\\(([^)]+)\\)`, 'gi');
-    result = result.replace(regex3, (_match, left, args) => `CONCAT(${left}, ${args})`);
-
-    // Pattern 5: Catch any remaining CONCAT(...) patterns followed by + column
+    // Pattern 2: column + column
     result = result.replace(
-      /CONCAT\(([^)]+)\)\s*\)\s*\+\s*`([^`]+)`/g,
-      (_match, args, colName) => `CONCAT(${args}, \`${colName}\`))`
+      /`([^`]+)`\s*\+\s*`([^`]+)`/g,
+      (_match, col1, col2) => `CONCAT(\`${col1}\`, \`${col2}\`)`
+    );
+
+    // Pattern 3: CONCAT(...) + literal or column (but not inside CASE)
+    // Use negative lookahead to avoid matching inside CASE WHEN...THEN
+    result = result.replace(
+      /CONCAT\(([^)]+(?:\([^)]*\))?[^)]*)\)\s*\+\s*('([^']+)'|`([^`]+)`)/g,
+      (_match, args, token) => `CONCAT(${args}, ${token})`
+    );
+
+    // Pattern 4: literal/column + CONCAT(...)
+    result = result.replace(
+      /('([^']+)'|`([^`]+)`)\s*\+\s*CONCAT\(([^)]+(?:\([^)]*\))?[^)]*)\)/g,
+      (_match, token, _lit, _col, args) => `CONCAT(${token}, ${args})`
+    );
+
+    // Pattern 5: CONCAT(...) + CAST(...)
+    result = result.replace(
+      /CONCAT\(([^)]+(?:\([^)]*\))?[^)]*)\)\s*\+\s*CAST\(([^)]+)\s+AS\s+([^)]+)\)/gi,
+      (_match, concatArgs, castExpr, castType) => `CONCAT(${concatArgs}, CAST(${castExpr} AS ${castType}))`
+    );
+
+    // Pattern 6: CAST(...) + CONCAT(...)
+    result = result.replace(
+      /CAST\(([^)]+)\s+AS\s+([^)]+)\)\s*\+\s*CONCAT\(([^)]+(?:\([^)]*\))?[^)]*)\)/gi,
+      (_match, castExpr, castType, concatArgs) => `CONCAT(CAST(${castExpr} AS ${castType}), ${concatArgs})`
+    );
+
+    // Pattern 7: literal + CAST(...)
+    result = result.replace(
+      /'([^']+)'\s*\+\s*CAST\(([^)]+)\s+AS\s+([^)]+)\)/gi,
+      (_match, lit, castExpr, castType) => `CONCAT('${lit}', CAST(${castExpr} AS ${castType}))`
+    );
+
+    // Pattern 8: CAST(...) + literal
+    result = result.replace(
+      /CAST\(([^)]+)\s+AS\s+([^)]+)\)\s*\+\s*'([^']+)'/gi,
+      (_match, castExpr, castType, lit) => `CONCAT(CAST(${castExpr} AS ${castType}), '${lit}')`
+    );
+
+    // Pattern 9: CAST(...) + column
+    result = result.replace(
+      /CAST\(([^)]+)\s+AS\s+([^)]+)\)\s*\+\s*`([^`]+)`/gi,
+      (_match, castExpr, castType, col) => `CONCAT(CAST(${castExpr} AS ${castType}), \`${col}\`)`
+    );
+
+    // Pattern 10: column + CAST(...)
+    result = result.replace(
+      /`([^`]+)`\s*\+\s*CAST\(([^)]+)\s+AS\s+([^)]+)\)/gi,
+      (_match, col, castExpr, castType) => `CONCAT(\`${col}\`, CAST(${castExpr} AS ${castType}))`
+    );
+
+    // Pattern 11: coalesce(...) + literal or column
+    result = result.replace(
+      /coalesce\(([^)]+(?:\([^)]*\))?[^)]*)\)\s*\+\s*('([^']+)'|`([^`]+)`)/gi,
+      (_match, args, token) => `CONCAT(coalesce(${args}), ${token})`
+    );
+
+    // Pattern 12: literal or column + coalesce(...)
+    result = result.replace(
+      /('([^']+)'|`([^`]+)`)\s*\+\s*coalesce\(([^)]+(?:\([^)]*\))?[^)]*)\)/gi,
+      (_match, token, _lit, _col, args) => `CONCAT(${token}, coalesce(${args}))`
+    );
+
+    // Pattern 13: IFNULL(...) + literal or column
+    result = result.replace(
+      /IFNULL\(([^)]+(?:\([^)]*\))?[^)]*)\)\s*\+\s*('([^']+)'|`([^`]+)`)/gi,
+      (_match, args, token) => `CONCAT(IFNULL(${args}), ${token})`
+    );
+
+    // Pattern 14: literal or column + IFNULL(...)
+    result = result.replace(
+      /('([^']+)'|`([^`]+)`)\s*\+\s*IFNULL\(([^)]+(?:\([^)]*\))?[^)]*)\)/gi,
+      (_match, token, _lit, _col, args) => `CONCAT(${token}, IFNULL(${args}))`
     );
 
     changed = (before !== result);
     iterations++;
   }
 
-  // Final cleanup: If there are still any + operators remaining
-  if (result.includes('+') && !result.toLowerCase().includes('interval')) {
-    // Last resort: Try to fix simple cases of CONCAT...)) + expr
-    result = result.replace(
-      /CONCAT\(([^)]+(?:\([^)]*\)[^)]*)*)\)\s*\)\s*\+\s*([^)]+)\)/g,
-      'CONCAT($1, $2))'
-    );
-  }
-
-  // Remove one layer of excessive wrapping parentheses around entire expression
+  // Final cleanup: Remove excessive parentheses
   result = result.replace(/^\({3,}(CONCAT\(.+\))\){3,}$/g, '(($1))');
-
-  // Simpler fix: just reduce )))) to )))
-  result = result.replace(/\){4}/g, ')))');
+  result = result.replace(/\){4,}/g, ')))');
 
   return result;
 }
@@ -285,7 +340,44 @@ export function convertMSSQLFormulaToMySQL(formula: string): string {
     dateIterations++;
   }
 
-  // STEP 5: Convert other NULL and string functions
+  // STEP 5: Convert DATEPART function
+  // DATEPART(weekday, date) -> DAYOFWEEK(date)
+  // DATEPART(year, date) -> YEAR(date)
+  // DATEPART(month, date) -> MONTH(date)
+  // DATEPART(day, date) -> DAY(date)
+  // DATEPART(hour, date) -> HOUR(date)
+  // DATEPART(minute, date) -> MINUTE(date)
+  // DATEPART(second, date) -> SECOND(date)
+  converted = converted.replace(
+    /\bdatepart\s*\(\s*weekday\s*,\s*([^)]+)\)/gi,
+    (_match, date) => `DAYOFWEEK(${date.trim()})`
+  );
+  converted = converted.replace(
+    /\bdatepart\s*\(\s*year\s*,\s*([^)]+)\)/gi,
+    (_match, date) => `YEAR(${date.trim()})`
+  );
+  converted = converted.replace(
+    /\bdatepart\s*\(\s*month\s*,\s*([^)]+)\)/gi,
+    (_match, date) => `MONTH(${date.trim()})`
+  );
+  converted = converted.replace(
+    /\bdatepart\s*\(\s*day\s*,\s*([^)]+)\)/gi,
+    (_match, date) => `DAY(${date.trim()})`
+  );
+  converted = converted.replace(
+    /\bdatepart\s*\(\s*hour\s*,\s*([^)]+)\)/gi,
+    (_match, date) => `HOUR(${date.trim()})`
+  );
+  converted = converted.replace(
+    /\bdatepart\s*\(\s*minute\s*,\s*([^)]+)\)/gi,
+    (_match, date) => `MINUTE(${date.trim()})`
+  );
+  converted = converted.replace(
+    /\bdatepart\s*\(\s*second\s*,\s*([^)]+)\)/gi,
+    (_match, date) => `SECOND(${date.trim()})`
+  );
+
+  // STEP 6: Convert other NULL and string functions
   converted = converted.replace(/\bisnull\s*\(/gi, 'IFNULL(');
   converted = converted.replace(/\blen\s*\(/gi, 'CHAR_LENGTH(');
   converted = converted.replace(/\brtrim\s*\(/gi, 'TRIM(');
@@ -304,6 +396,28 @@ export function convertMSSQLFormulaToMySQL(formula: string): string {
     /\bchecksum\s*\(([^)]+)\)/gi,
     (_match, args) => {
       return `CRC32(CONCAT_WS(',', ${args}))`;
+    }
+  );
+
+  // STEP 7.5: Convert hierarchyid methods
+  // hierarchyid.GetLevel() -> returns the level in the hierarchy (StarRocks doesn't support hierarchyid)
+  // Match both `column`.`GetLevel`() and `column`.GetLevel() patterns
+  converted = converted.replace(
+    /`([^`]+)`\.`?GetLevel`?\s*\(\s*\)/gi,
+    (_match, columnName) => {
+      // GetLevel() returns the depth level of the hierarchyid
+      // Since StarRocks doesn't have hierarchyid, assume it's stored as STRING with path like '/1/2/3/'
+      // Count the slashes to determine level (subtract 1 because path starts and ends with /)
+      return `(CHAR_LENGTH(\`${columnName}\`) - CHAR_LENGTH(REPLACE(\`${columnName}\`, '/', '')) - 1)`;
+    }
+  );
+
+  // Handle hierarchyid.ToString() - converts hierarchyid to string representation
+  converted = converted.replace(
+    /`([^`]+)`\.`?ToString`?\s*\(\s*\)/gi,
+    (_match, columnName) => {
+      // If already stored as string, just return the column
+      return `\`${columnName}\``;
     }
   );
 
@@ -332,6 +446,11 @@ export function inferComputedColumnType(col: ColumnInfo, formula: string): strin
     if (thenMatches && elseMatches) {
       return 'TINYINT';
     }
+  }
+
+  // Check for hierarchyid.GetLevel() - returns SMALLINT
+  if (lowerFormula.includes('char_length') && lowerFormula.includes('replace') && lowerFormula.includes("'/'")) {
+    return 'SMALLINT';
   }
 
   // Check for TIMESTAMPDIFF outside of CASE expressions

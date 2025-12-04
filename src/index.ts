@@ -637,56 +637,35 @@ class StarRocksScriptGenerator {
       }
     }
 
-    // Separate computed and regular columns
-    const regularColumns = columns.filter(col => !col.isComputed);
-    const computedColumns = columns.filter(col => col.isComputed);
+    // Determine primary key columns first (needed for reordering)
+    let primaryKey = override?.primaryKey || tableSchema.primaryKey;
+    const primaryKeySet = new Set(primaryKey);
 
-    // Map regular columns
-    const regularColumnDefs = regularColumns.map(col => {
+    // Separate computed and regular columns
+    // IMPORTANT: StarRocks computed columns should NOT be in CREATE TABLE
+    // They will be added later via ALTER TABLE statements
+    const regularColumns = columns.filter(col => !col.isComputed);
+
+    // Reorder regular columns: primary key columns first, then others
+    // StarRocks requires PRIMARY KEY columns to be the first columns in the schema
+    const pkColumns = regularColumns.filter(col => primaryKeySet.has(col.name));
+    const nonPkColumns = regularColumns.filter(col => !primaryKeySet.has(col.name));
+    const reorderedRegularColumns = [...pkColumns, ...nonPkColumns];
+
+    // Map regular columns (already reordered)
+    const regularColumnDefs = reorderedRegularColumns.map(col => {
       const customMapping = override?.customMappings?.[col.name]?.starRocks;
       const starRocksType = this.typeMapper.mapType(col, 'starRocks', customMapping);
       const nullable = col.isNullable ? 'NULL' : 'NOT NULL';
       return `  \`${col.name}\` ${starRocksType} ${nullable}`;
     });
 
-    // Map computed columns as generated columns with their formulas
-    // Convert MSSQL formula syntax to MySQL/StarRocks compatible syntax
-    // StarRocks requires explicit type definitions for computed columns
-    const computedColumnDefs = computedColumns.map(col => {
-      const formula = col.computedFormula || '';
-      let convertedFormula = SqlConverter.convertMSSQLFormulaToMySQL(formula);
+    // Use only regular columns for CREATE TABLE
+    // Computed columns will be added via ALTER TABLE in the separate file
+    const allColumnDefs = regularColumnDefs;
 
-      // Fix column name casing - StarRocks is case-sensitive
-      // Replace column references with the correct case from the actual column names
-      convertedFormula = SqlConverter.fixColumnNameCasing(convertedFormula, columns);
-
-      // Remove excessive outer wrapping parentheses from MSSQL formulas
-      // MSSQL often wraps formulas in ((...)), we only need one layer since we add () in template
-      while (convertedFormula.startsWith('((') && convertedFormula.endsWith('))')) {
-        const inner = convertedFormula.substring(1, convertedFormula.length - 1);
-        // Make sure we're not removing necessary parens by checking balance
-        if (inner.startsWith('(') && inner.endsWith(')')) {
-          convertedFormula = inner;
-        } else {
-          break;
-        }
-      }
-
-      // Infer the type from the computed formula or use a default type
-      const inferredType = SqlConverter.inferComputedColumnType(col, convertedFormula);
-
-      // StarRocks syntax: column_name type AS (expression)
-      return `  \`${col.name}\` ${inferredType} AS (${convertedFormula})`;
-    });
-
-    // Combine regular and computed columns
-    const allColumnDefs = [...regularColumnDefs, ...computedColumnDefs];
-
-    // StarRocks requires PRIMARY KEY columns to appear in the same order as in the schema
-    // So we need to sort the primary key columns by their position in the columns array
-    let primaryKey = override?.primaryKey || tableSchema.primaryKey;
+    // Sort primary key columns by their position in the schema (already determined above)
     if (primaryKey.length > 0) {
-      // Sort primary key columns by their position in the schema
       const columnOrder = new Map(columns.map((col, idx) => [col.name, idx]));
       primaryKey = [...primaryKey].sort((a, b) => {
         const posA = columnOrder.get(a) ?? 999;
@@ -697,7 +676,7 @@ class StarRocksScriptGenerator {
 
     const pk = primaryKey.length > 0
       ? primaryKey.map(k => `\`${k}\``).join(', ')
-      : regularColumns[0]?.name || 'id';
+      : reorderedRegularColumns[0]?.name || 'id';
 
     // Table name without schema prefix (dbo_)
     const tableName = tableSchema.table;
@@ -867,6 +846,134 @@ class MigrationScriptGenerator {
     fs.writeFileSync(computedColumnsFile, computedColumnsScript);
 
     return computedColumnsFile;
+  }
+
+  /**
+   * Generate DROP COLUMN statements for all computed columns (for cleanup/rollback)
+   */
+  static generateDropComputedColumnsFile(outputDir: string): string | null {
+    if (MigrationScriptGenerator.globalComputedColumns.length === 0) {
+      return null;
+    }
+
+    let dropScript = `-- ============================================================================\n`;
+    dropScript += `-- StarRocks/MySQL DROP Statements for All Computed Columns\n`;
+    dropScript += `-- ============================================================================\n`;
+    dropScript += `-- IMPORTANT: This script drops all computed columns\n`;
+    dropScript += `-- Use this for cleanup or before recreating computed columns\n`;
+    dropScript += `-- Execute this script in StarRocks SQL Client or MySQL\n`;
+    dropScript += `--\n`;
+    dropScript += `-- Generated: ${new Date().toISOString()}\n`;
+    dropScript += `-- Total Computed Columns: ${MigrationScriptGenerator.globalComputedColumns.length}\n`;
+    dropScript += `-- ============================================================================\n\n`;
+
+    // Group by table
+    const columnsByTable = new Map<string, typeof MigrationScriptGenerator.globalComputedColumns>();
+    for (const col of MigrationScriptGenerator.globalComputedColumns) {
+      const tableKey = `${col.schema}.${col.table}`;
+      if (!columnsByTable.has(tableKey)) {
+        columnsByTable.set(tableKey, []);
+      }
+      columnsByTable.get(tableKey)!.push(col);
+    }
+
+    // Get database name from first column (all should be in same DB)
+    const firstCol = MigrationScriptGenerator.globalComputedColumns[0];
+    const databaseName = firstCol.jobName.split('_').slice(-1)[0].replace(/-/g, '_');
+
+    // Generate DROP statements for each table
+    for (const [tableKey, columns] of columnsByTable) {
+      const [_schema, tableName] = tableKey.split('.');
+
+      dropScript += `-- ============================================================================\n`;
+      dropScript += `-- Table: ${tableKey}\n`;
+      dropScript += `-- Computed Columns: ${columns.length}\n`;
+      dropScript += `-- Jobs: ${[...new Set(columns.map(c => c.jobName))].join(', ')}\n`;
+      dropScript += `-- ============================================================================\n\n`;
+
+      for (const col of columns) {
+        dropScript += `-- Column: ${col.column.name}\n`;
+        dropScript += `-- Type: ${col.inferredType}\n`;
+        dropScript += `ALTER TABLE \`${databaseName}\`.\`${tableName}\`\n`;
+        dropScript += `DROP COLUMN \`${col.column.name}\`;\n\n`;
+      }
+    }
+
+    const dropFile = path.join(outputDir, 'drop_computed_columns_starrocks.sql');
+    fs.writeFileSync(dropFile, dropScript);
+
+    return dropFile;
+  }
+
+  /**
+   * Generate StarRocks/MySQL ALTER statements for all computed columns
+   */
+  static generateConvertedComputedColumnsFile(outputDir: string): string | null {
+    if (MigrationScriptGenerator.globalComputedColumns.length === 0) {
+      return null;
+    }
+
+    let convertedScript = `-- ============================================================================\n`;
+    convertedScript += `-- StarRocks/MySQL ALTER Statements for All Computed Columns\n`;
+    convertedScript += `-- ============================================================================\n`;
+    convertedScript += `-- IMPORTANT: This script contains ALTER statements in StarRocks/MySQL format\n`;
+    convertedScript += `-- Execute this script in StarRocks SQL Client or MySQL\n`;
+    convertedScript += `-- These statements add computed columns with CONVERTED expressions\n`;
+    convertedScript += `--\n`;
+    convertedScript += `-- Generated: ${new Date().toISOString()}\n`;
+    convertedScript += `-- Total Computed Columns: ${MigrationScriptGenerator.globalComputedColumns.length}\n`;
+    convertedScript += `-- ============================================================================\n\n`;
+
+    // Group by table
+    const columnsByTable = new Map<string, typeof MigrationScriptGenerator.globalComputedColumns>();
+    for (const col of MigrationScriptGenerator.globalComputedColumns) {
+      const tableKey = `${col.schema}.${col.table}`;
+      if (!columnsByTable.has(tableKey)) {
+        columnsByTable.set(tableKey, []);
+      }
+      columnsByTable.get(tableKey)!.push(col);
+    }
+
+    // Get database name from first column (all should be in same DB)
+    const firstCol = MigrationScriptGenerator.globalComputedColumns[0];
+    const databaseName = firstCol.jobName.split('_').slice(-1)[0].replace(/-/g, '_');
+
+    // Generate ALTER statements for each table
+    for (const [tableKey, columns] of columnsByTable) {
+      const [_schema, tableName] = tableKey.split('.');
+
+      convertedScript += `-- ============================================================================\n`;
+      convertedScript += `-- Table: ${tableKey}\n`;
+      convertedScript += `-- Computed Columns: ${columns.length}\n`;
+      convertedScript += `-- Jobs: ${[...new Set(columns.map(c => c.jobName))].join(', ')}\n`;
+      convertedScript += `-- ============================================================================\n\n`;
+
+      for (const col of columns) {
+        // Use the original MSSQL formula and convert it
+        const mssqlFormula = col.column.computedFormula || '';
+        const convertedFormula = col.convertedFormula || SqlConverter.convertMSSQLFormulaToMySQL(mssqlFormula);
+        const inferredType = col.inferredType || SqlConverter.inferComputedColumnType(col.column, convertedFormula);
+
+        convertedScript += `-- Column: ${col.column.name}\n`;
+        convertedScript += `-- Original MSSQL Type: ${col.column.sqlServerType}\n`;
+        convertedScript += `-- Inferred StarRocks Type: ${inferredType}\n`;
+        convertedScript += `-- Job: ${col.jobName}\n`;
+        convertedScript += `--\n`;
+        convertedScript += `-- Original MSSQL Formula:\n`;
+        convertedScript += `--   ${mssqlFormula}\n`;
+        convertedScript += `--\n`;
+        convertedScript += `-- Converted Formula:\n`;
+        convertedScript += `--   ${convertedFormula}\n`;
+        convertedScript += `--\n`;
+        convertedScript += `ALTER TABLE \`${databaseName}\`.\`${tableName}\`\n`;
+        convertedScript += `ADD COLUMN \`${col.column.name}\` ${inferredType} AS (${convertedFormula});\n\n`;
+      }
+    }
+
+    const convertedFile = path.join(outputDir, 'all_computed_columns_starrocks.sql');
+    fs.writeFileSync(convertedFile, convertedScript);
+
+    return convertedFile;
   }
 
   async generate(detectChanges: boolean = false): Promise<void> {
@@ -1155,10 +1262,14 @@ program
       // Generate single file with all computed columns
       if (starRocksOutputDir) {
         const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(starRocksOutputDir);
+        const convertedColumnsFile = MigrationScriptGenerator.generateConvertedComputedColumnsFile(starRocksOutputDir);
+        const dropColumnsFile = MigrationScriptGenerator.generateDropComputedColumnsFile(starRocksOutputDir);
 
         if (computedColumnsFile) {
           console.log(`\n\n📝 Computed Columns Summary:`);
           console.log(`   All Computed Columns (MSSQL): ${computedColumnsFile}`);
+          console.log(`   Converted Columns (StarRocks): ${convertedColumnsFile}`);
+          console.log(`   DROP Columns (StarRocks): ${dropColumnsFile}`);
           console.log(`   Total Computed Columns: ${MigrationScriptGenerator['globalComputedColumns'].length}`);
         }
       }
