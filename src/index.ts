@@ -25,7 +25,7 @@ import {
   TableSchema,
   TableMetadata,
 } from './types';
-import * as SqlConverter from './sql-formula-converter';
+// Removed SqlConverter import - MySQL conversion no longer needed
 
 // ============================================================================
 // Default Type Mappings
@@ -571,8 +571,6 @@ class StarRocksScriptGenerator {
     schema: string;
     table: string;
     column: ColumnInfo;
-    convertedFormula: string;
-    inferredType: string;
   }> {
     let columns = [...tableSchema.columns];
 
@@ -591,33 +589,13 @@ class StarRocksScriptGenerator {
       schema: string;
       table: string;
       column: ColumnInfo;
-      convertedFormula: string;
-      inferredType: string;
     }> = [];
 
     for (const col of computedColumns) {
-      const formula = col.computedFormula || '';
-      let convertedFormula = SqlConverter.convertMSSQLFormulaToMySQL(formula);
-      convertedFormula = SqlConverter.fixColumnNameCasing(convertedFormula, columns);
-
-      // Remove excessive outer wrapping parentheses
-      while (convertedFormula.startsWith('((') && convertedFormula.endsWith('))')) {
-        const inner = convertedFormula.substring(1, convertedFormula.length - 1);
-        if (inner.startsWith('(') && inner.endsWith(')')) {
-          convertedFormula = inner;
-        } else {
-          break;
-        }
-      }
-
-      const inferredType = SqlConverter.inferComputedColumnType(col, convertedFormula);
-
       result.push({
         schema: tableSchema.schema,
         table: tableSchema.table,
         column: col,
-        convertedFormula,
-        inferredType,
       });
     }
 
@@ -772,8 +750,6 @@ class MigrationScriptGenerator {
     schema: string;
     table: string;
     column: ColumnInfo;
-    convertedFormula: string;
-    inferredType: string;
     jobName: string;
   }> = [];
 
@@ -893,7 +869,7 @@ class MigrationScriptGenerator {
 
       for (const col of columns) {
         dropScript += `-- Column: ${col.column.name}\n`;
-        dropScript += `-- Type: ${col.inferredType}\n`;
+        dropScript += `-- Type: ${col.column.sqlServerType}\n`;
         dropScript += `ALTER TABLE \`${databaseName}\`.\`${tableName}\`\n`;
         dropScript += `DROP COLUMN \`${col.column.name}\`;\n\n`;
       }
@@ -905,76 +881,7 @@ class MigrationScriptGenerator {
     return dropFile;
   }
 
-  /**
-   * Generate StarRocks/MySQL ALTER statements for all computed columns
-   */
-  static generateConvertedComputedColumnsFile(outputDir: string): string | null {
-    if (MigrationScriptGenerator.globalComputedColumns.length === 0) {
-      return null;
-    }
-
-    let convertedScript = `-- ============================================================================\n`;
-    convertedScript += `-- StarRocks/MySQL ALTER Statements for All Computed Columns\n`;
-    convertedScript += `-- ============================================================================\n`;
-    convertedScript += `-- IMPORTANT: This script contains ALTER statements in StarRocks/MySQL format\n`;
-    convertedScript += `-- Execute this script in StarRocks SQL Client or MySQL\n`;
-    convertedScript += `-- These statements add computed columns with CONVERTED expressions\n`;
-    convertedScript += `--\n`;
-    convertedScript += `-- Generated: ${new Date().toISOString()}\n`;
-    convertedScript += `-- Total Computed Columns: ${MigrationScriptGenerator.globalComputedColumns.length}\n`;
-    convertedScript += `-- ============================================================================\n\n`;
-
-    // Group by table
-    const columnsByTable = new Map<string, typeof MigrationScriptGenerator.globalComputedColumns>();
-    for (const col of MigrationScriptGenerator.globalComputedColumns) {
-      const tableKey = `${col.schema}.${col.table}`;
-      if (!columnsByTable.has(tableKey)) {
-        columnsByTable.set(tableKey, []);
-      }
-      columnsByTable.get(tableKey)!.push(col);
-    }
-
-    // Get database name from first column (all should be in same DB)
-    const firstCol = MigrationScriptGenerator.globalComputedColumns[0];
-    const databaseName = firstCol.jobName.split('_').slice(-1)[0].replace(/-/g, '_');
-
-    // Generate ALTER statements for each table
-    for (const [tableKey, columns] of columnsByTable) {
-      const [_schema, tableName] = tableKey.split('.');
-
-      convertedScript += `-- ============================================================================\n`;
-      convertedScript += `-- Table: ${tableKey}\n`;
-      convertedScript += `-- Computed Columns: ${columns.length}\n`;
-      convertedScript += `-- Jobs: ${[...new Set(columns.map(c => c.jobName))].join(', ')}\n`;
-      convertedScript += `-- ============================================================================\n\n`;
-
-      for (const col of columns) {
-        // Use the original MSSQL formula and convert it
-        const mssqlFormula = col.column.computedFormula || '';
-        const convertedFormula = col.convertedFormula || SqlConverter.convertMSSQLFormulaToMySQL(mssqlFormula);
-        const inferredType = col.inferredType || SqlConverter.inferComputedColumnType(col.column, convertedFormula);
-
-        convertedScript += `-- Column: ${col.column.name}\n`;
-        convertedScript += `-- Original MSSQL Type: ${col.column.sqlServerType}\n`;
-        convertedScript += `-- Inferred StarRocks Type: ${inferredType}\n`;
-        convertedScript += `-- Job: ${col.jobName}\n`;
-        convertedScript += `--\n`;
-        convertedScript += `-- Original MSSQL Formula:\n`;
-        convertedScript += `--   ${mssqlFormula}\n`;
-        convertedScript += `--\n`;
-        convertedScript += `-- Converted Formula:\n`;
-        convertedScript += `--   ${convertedFormula}\n`;
-        convertedScript += `--\n`;
-        convertedScript += `ALTER TABLE \`${databaseName}\`.\`${tableName}\`\n`;
-        convertedScript += `ADD COLUMN \`${col.column.name}\` ${inferredType} AS (${convertedFormula});\n\n`;
-      }
-    }
-
-    const convertedFile = path.join(outputDir, 'all_computed_columns_starrocks.sql');
-    fs.writeFileSync(convertedFile, convertedScript);
-
-    return convertedFile;
-  }
+  // Removed generateConvertedComputedColumnsFile method - MySQL conversion no longer needed
 
   async generate(detectChanges: boolean = false): Promise<void> {
     await this.extractor.connect();
@@ -1001,8 +908,6 @@ class MigrationScriptGenerator {
       schema: string;
       table: string;
       column: ColumnInfo;
-      convertedFormula: string;
-      inferredType: string;
     }> = [];
 
     // Complete pipeline script
@@ -1262,13 +1167,11 @@ program
       // Generate single file with all computed columns
       if (starRocksOutputDir) {
         const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(starRocksOutputDir);
-        const convertedColumnsFile = MigrationScriptGenerator.generateConvertedComputedColumnsFile(starRocksOutputDir);
         const dropColumnsFile = MigrationScriptGenerator.generateDropComputedColumnsFile(starRocksOutputDir);
 
         if (computedColumnsFile) {
           console.log(`\n\n📝 Computed Columns Summary:`);
           console.log(`   All Computed Columns (MSSQL): ${computedColumnsFile}`);
-          console.log(`   Converted Columns (StarRocks): ${convertedColumnsFile}`);
           console.log(`   DROP Columns (StarRocks): ${dropColumnsFile}`);
           console.log(`   Total Computed Columns: ${MigrationScriptGenerator['globalComputedColumns'].length}`);
         }
