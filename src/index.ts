@@ -114,12 +114,16 @@ class SchemaExtractor {
     if (!this.connection) throw new Error('Not connected to database');
 
     const query = `
-      SELECT 
+      SELECT
         TABLE_SCHEMA as [schema],
         TABLE_NAME as tableName
       FROM INFORMATION_SCHEMA.TABLES
       WHERE TABLE_SCHEMA = @schema
         AND TABLE_TYPE = 'BASE TABLE'
+        AND TABLE_NAME NOT LIKE 'sys%'
+        AND TABLE_NAME NOT LIKE 'MS%'
+        AND TABLE_NAME NOT LIKE 'dt%'
+        AND TABLE_NAME NOT LIKE 'trace_%'
       ORDER BY TABLE_NAME
     `;
 
@@ -257,6 +261,7 @@ class TypeMapper {
     // Replace placeholders
     targetType = targetType
       .replace('{maxLength}', column.maxLength?.toString() || '255')
+      .replace('{maxLength_times_2}', ((column.maxLength || 127) * 2).toString()) // For hex encoding of binary data
       .replace('{precision}', column.precision?.toString() || '10')
       .replace('{scale}', column.scale?.toString() || '0');
 
@@ -299,7 +304,18 @@ class FlinkScriptGenerator {
       return `  \`${col.name}\` ${flinkType}${nullable}`;
     });
 
-    const primaryKey = override?.primaryKey || tableSchema.primaryKey;
+    let primaryKey = override?.primaryKey || tableSchema.primaryKey;
+
+    // Sort primary key columns by their position in the schema
+    if (primaryKey.length > 0) {
+      const columnOrder = new Map(columns.map((col, idx) => [col.name, idx]));
+      primaryKey = [...primaryKey].sort((a, b) => {
+        const posA = columnOrder.get(a) ?? 999;
+        const posB = columnOrder.get(b) ?? 999;
+        return posA - posB;
+      });
+    }
+
     const pk = primaryKey.length > 0
       ? `,\n  PRIMARY KEY (${primaryKey.map(k => `\`${k}\``).join(', ')}) NOT ENFORCED`
       : '';
@@ -351,7 +367,11 @@ ${columnDefs.join(',\n')}${pk}
 
   -- Debezium Configuration for Exactly-Once Semantics
   'debezium.snapshot.mode' = 'initial',
-  'debezium.snapshot.locking.mode' = 'none',
+  'debezium.snapshot.locking.mode' = 'minimal',
+  'debezium.snapshot.lock.timeout.ms' = '120000',
+  'debezium.snapshot.lock.acquire.timeout.ms' = '120000',
+  'debezium.snapshot.isolation.mode' = 'read_uncommitted',
+  'debezium.database.query.timeout.ms' = '120000',
   'debezium.database.history.store.only.captured.tables.ddl' = 'true'
 );
 `;
@@ -380,7 +400,18 @@ ${columnDefs.join(',\n')}${pk}
       return `  \`${col.name}\` ${flinkType}${nullable}`;
     });
 
-    const primaryKey = override?.primaryKey || tableSchema.primaryKey;
+    let primaryKey = override?.primaryKey || tableSchema.primaryKey;
+
+    // Sort primary key columns by their position in the schema
+    if (primaryKey.length > 0) {
+      const columnOrder = new Map(columns.map((col, idx) => [col.name, idx]));
+      primaryKey = [...primaryKey].sort((a, b) => {
+        const posA = columnOrder.get(a) ?? 999;
+        const posB = columnOrder.get(b) ?? 999;
+        return posA - posB;
+      });
+    }
+
     const pk = primaryKey.length > 0
       ? `,\n  PRIMARY KEY (${primaryKey.map(k => `\`${k}\``).join(', ')}) NOT ENFORCED`
       : '';

@@ -136,20 +136,55 @@ export class IOAnalyzer {
 
       console.log(`   ✓ Found ${result.recordset.length} tables with I/O statistics`);
 
-      // If no I/O stats found, fall back to all tables
-      if (result.recordset.length === 0) {
-        console.log(`   ⚠️  No I/O statistics found (DMV may be empty or server recently restarted)`);
-        console.log(`   📋 Fetching all tables from schema...`);
-        tables = await this.getAllTablesAsFallback(schema);
-      } else {
-        // Get row counts for tables (separate query since we don't join with partitions)
-        const tableNames = result.recordset.map((r: any) => r.TableName);
-        const rowCountMap = await this.getRowCountsForTables(schema, tableNames);
+      // Always get ALL tables from the schema, not just those with I/O stats
+      console.log(`   📋 Fetching all tables from schema to ensure complete coverage...`);
+      const allTablesQuery = `
+        SELECT
+          TABLE_SCHEMA as SchemaName,
+          TABLE_NAME as TableName
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = @schema
+          AND TABLE_TYPE = 'BASE TABLE'
+          AND TABLE_NAME NOT LIKE 'sys%'
+          AND TABLE_NAME NOT LIKE 'MS%'
+          AND TABLE_NAME NOT LIKE 'dt%'
+          AND TABLE_NAME NOT LIKE 'trace_%'
+        ORDER BY TABLE_NAME
+      `;
 
-        tables = result.recordset.map((row: any) => {
-          const totalReads = Number(row.TotalReads) || 0;
-          const totalWrites = Number(row.TotalWrites) || 0;
-          const totalIO = Number(row.TotalIO) || 0;
+      const allTablesResult = await this.connection.request()
+        .input('schema', schema)
+        .query(allTablesQuery);
+
+      console.log(`   ✓ Found ${allTablesResult.recordset.length} total tables in schema`);
+
+      // Create a map of I/O statistics for quick lookup
+      const ioStatsMap = new Map();
+      result.recordset.forEach((row: any) => {
+        ioStatsMap.set(row.TableName, {
+          totalReads: Number(row.TotalReads) || 0,
+          totalWrites: Number(row.TotalWrites) || 0,
+          totalIO: Number(row.TotalIO) || 0,
+          lastSeek: row.LastSeek ? new Date(row.LastSeek) : null,
+          lastScan: row.LastScan ? new Date(row.LastScan) : null,
+          lastUpdate: row.LastUpdate ? new Date(row.LastUpdate) : null
+        });
+      });
+
+      // Get row counts for ALL tables
+      const allTableNames = allTablesResult.recordset.map((r: any) => r.TableName);
+      const rowCountMap = await this.getRowCountsForTables(schema, allTableNames);
+
+      // Process ALL tables, using I/O stats where available
+      tables = allTablesResult.recordset.map((tableRow: any) => {
+        const tableName = tableRow.TableName;
+        const ioStats = ioStatsMap.get(tableName);
+
+        if (ioStats) {
+          // Table has I/O statistics
+          const totalReads = ioStats.totalReads;
+          const totalWrites = ioStats.totalWrites;
+          const totalIO = ioStats.totalIO;
 
           // Calculate read/write ratio
           let readWriteRatio = 0;
@@ -160,26 +195,37 @@ export class IOAnalyzer {
           }
 
           // Determine last activity
-          const lastSeek = row.LastSeek ? new Date(row.LastSeek) : null;
-          const lastScan = row.LastScan ? new Date(row.LastScan) : null;
-          const lastUpdate = row.LastUpdate ? new Date(row.LastUpdate) : null;
-          const lastActivity = [lastSeek, lastScan, lastUpdate]
+          const lastActivity = [ioStats.lastSeek, ioStats.lastScan, ioStats.lastUpdate]
             .filter(d => d !== null)
             .sort((a, b) => b!.getTime() - a!.getTime())[0] || null;
 
           return {
-            schema: row.SchemaName,
-            table: row.TableName,
+            schema: tableRow.SchemaName,
+            table: tableName,
             totalIOOperations: totalIO,
             totalReads,
             totalUpdates: totalWrites,
             readWriteRatio,
-            rowCount: rowCountMap.get(row.TableName) || 0,
+            rowCount: rowCountMap.get(tableName) || 0,
             lastActivity,
-            category: this.categorizeTable(totalWrites, options),
+            category: this.categorizeTable(totalIO, options), // Use totalIO for categorization
           };
-        });
-      }
+        } else {
+          // Table has no I/O statistics - treat as low I/O
+          const rowCount = rowCountMap.get(tableName) || 0;
+          return {
+            schema: tableRow.SchemaName,
+            table: tableName,
+            totalIOOperations: 0,
+            totalReads: 0,
+            totalUpdates: 0,
+            readWriteRatio: 0,
+            rowCount,
+            lastActivity: null,
+            category: 'low' as const,
+          };
+        }
+      });
     } catch (error: any) {
       // Handle permission denied errors gracefully
       const errorMessage = error.message || '';
@@ -301,6 +347,10 @@ export class IOAnalyzer {
           AND p.index_id IN (0, 1)
         WHERE t.TABLE_SCHEMA = @schema
           AND t.TABLE_TYPE = 'BASE TABLE'
+          AND t.TABLE_NAME NOT LIKE 'sys%'
+          AND t.TABLE_NAME NOT LIKE 'MS%'
+          AND t.TABLE_NAME NOT LIKE 'dt%'
+          AND t.TABLE_NAME NOT LIKE 'trace_%'
         GROUP BY t.TABLE_SCHEMA, t.TABLE_NAME
         ORDER BY TableRowCount DESC
       `;
@@ -349,6 +399,10 @@ export class IOAnalyzer {
         AND p.index_id IN (0, 1)
       WHERE t.TABLE_SCHEMA = @schema
         AND t.TABLE_TYPE = 'BASE TABLE'
+        AND t.TABLE_NAME NOT LIKE 'sys%'
+        AND t.TABLE_NAME NOT LIKE 'MS%'
+        AND t.TABLE_NAME NOT LIKE 'dt%'
+        AND t.TABLE_NAME NOT LIKE 'trace_%'
       ORDER BY t.TABLE_NAME
     `;
 
