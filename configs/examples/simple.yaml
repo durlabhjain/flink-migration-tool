@@ -9,6 +9,16 @@ database:
   port: 1433
   encrypt: false  # Set to true for Azure SQL or production
 
+# Optional: StarRocks connection configuration
+# If omitted, placeholders will be used in generated scripts
+starRocks:
+  feHost: "starrocks.example.com"      # StarRocks FE host
+  database: "analytics"                 # Target StarRocks database
+  username: "root"                      # StarRocks username
+  password: "starrocks_password"        # StarRocks password
+  jdbcPort: 9030                        # JDBC port (optional, default: 9030)
+  loadPort: 8030                        # HTTP port (optional, default: 8030)
+
 # Schema to process
 schema: "dbo"
 

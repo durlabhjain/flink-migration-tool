@@ -1,0 +1,48 @@
+# Base Configuration for I/O Analysis
+# Auto-generated configs will inherit these settings
+
+database:
+  server: ""  # IP address used for I/O analysis
+  serverHostname: ""  # Optional: Hostname for Flink CDC (if different from server)
+  database: ""
+  user: ""
+  password: ""
+  port: 1433
+  encrypt: false
+
+starRocks:
+  feHost: ""
+  database: ""
+  username: ""
+  password: ""
+  jdbcPort: 9030
+  loadPort: 8030
+
+schema: "dbo"
+
+# Optional: job name for organizing output
+jobName: ""
+
+  # Flink checkpoint and savepoint configuration
+flink:
+  checkpointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints"
+  savepointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints"
+
+# Global filters applied to ALL auto-generated configs
+global:
+  # Exclude unwanted columns globally
+  columns:
+    exclude:
+      - "Version"
+
+  # Exclude specific tables from I/O analysis and job generation
+  # These tables will not be included in any generated config files
+  tables:
+    exclude:
+      # - "Table Name 1"
+      # - "Table Name 2"
+
+output:
+  flinkPath: "./output/flink"
+  starRocksPath: "./output/starrocks"
+  checksumPath: "./output/checksums"

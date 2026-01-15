@@ -9,6 +9,13 @@ database:
   port: 1433
   encrypt: true
 
+# StarRocks configuration (can mix direct values and env vars)
+starRocks:
+  feHost: "starrocks-prod.example.com"  # Direct value
+  database: "${STARROCKS_DATABASE}"      # From environment
+  username: "${STARROCKS_USERNAME}"      # From environment
+  password: "${STARROCKS_PASSWORD}"      # From environment
+
 schema: "inventory"
 jobName: "inventory_master_data"
 

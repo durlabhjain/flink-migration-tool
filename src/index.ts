@@ -9,81 +9,23 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { Command } from 'commander';
 import { glob } from 'glob';
-
-// ============================================================================
-// Configuration Types
-// ============================================================================
-
-interface DatabaseConfig {
-  server: string;
-  database: string;
-  user: string;
-  password: string;
-  port?: number;
-  encrypt?: boolean;
-}
-
-interface TypeMapping {
-  sqlServer: string;
-  flink: string;
-  starRocks: string;
-  pattern?: string;
-}
-
-interface PatternConfig {
-  include?: string[];  // Regex patterns to include
-  exclude?: string[];  // Regex patterns to exclude
-}
-
-interface GlobalConfig {
-  tables?: PatternConfig;
-  columns?: PatternConfig;
-}
-
-interface TableOverride {
-  table: string;
-  primaryKey?: string[];
-  excludeColumns?: string[];
-  includeColumns?: string[];
-  customMappings?: Record<string, { flink?: string; starRocks?: string }>;
-}
-
-interface SchemaConfig {
-  database: DatabaseConfig;
-  schema: string;  // Schema name for this config file
-  global?: GlobalConfig;  // Global include/exclude patterns
-  tableOverrides?: TableOverride[];  // Per-table overrides
-  typeMappings?: TypeMapping[];
-  output: {
-    flinkPath: string;
-    starRocksPath: string;
-    checksumPath: string;
-  };
-  jobName?: string;  // Optional job name for multi-job organization
-}
-
-interface ColumnInfo {
-  name: string;
-  sqlServerType: string;
-  isNullable: boolean;
-  maxLength?: number;
-  precision?: number;
-  scale?: number;
-}
-
-interface TableSchema {
-  schema: string;
-  table: string;
-  columns: ColumnInfo[];
-  primaryKey: string[];
-  checksum: string;
-  timestamp: string;
-}
-
-interface TableMetadata {
-  schema: string;
-  table: string;
-}
+import { IOAnalyzer } from './io-analyzer';
+import { ConfigGenerator } from './config-generator';
+import { resolveEnvVars } from './helper';
+import { PatternMatcher } from './pattern-matcher';
+import {
+  ColumnInfo,
+  DatabaseConfig,
+  StarRocksConfig,
+  TypeMapping,
+  PatternConfig,
+  TableOverride,
+  FlinkConfig,
+  SchemaConfig,
+  TableSchema,
+  TableMetadata,
+} from './types';
+// Removed SqlConverter import - MySQL conversion no longer needed
 
 // ============================================================================
 // Default Type Mappings
@@ -91,21 +33,21 @@ interface TableMetadata {
 
 const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   // Integer types
-  { sqlServer: 'tinyint', flink: 'TINYINT', starRocks: 'TINYINT' },
+  { sqlServer: 'tinyint', flink: 'SMALLINT', starRocks: 'SMALLINT' },
   { sqlServer: 'smallint', flink: 'SMALLINT', starRocks: 'SMALLINT' },
   { sqlServer: 'int', flink: 'INT', starRocks: 'INT' },
   { sqlServer: 'bigint', flink: 'BIGINT', starRocks: 'BIGINT' },
-  
+
   // Decimal types
   { sqlServer: 'decimal', flink: 'DECIMAL({precision},{scale})', starRocks: 'DECIMAL({precision},{scale})' },
   { sqlServer: 'numeric', flink: 'DECIMAL({precision},{scale})', starRocks: 'DECIMAL({precision},{scale})' },
   { sqlServer: 'money', flink: 'DECIMAL(19,4)', starRocks: 'DECIMAL(19,4)' },
   { sqlServer: 'smallmoney', flink: 'DECIMAL(10,4)', starRocks: 'DECIMAL(10,4)' },
-  
+
   // Floating point
   { sqlServer: 'float', flink: 'DOUBLE', starRocks: 'DOUBLE' },
   { sqlServer: 'real', flink: 'FLOAT', starRocks: 'FLOAT' },
-  
+
   // String types
   { sqlServer: 'char', flink: 'CHAR({maxLength})', starRocks: 'CHAR({maxLength})' },
   { sqlServer: 'varchar', flink: 'VARCHAR({maxLength})', starRocks: 'VARCHAR({maxLength})' },
@@ -113,7 +55,7 @@ const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   { sqlServer: 'nvarchar', flink: 'VARCHAR({maxLength})', starRocks: 'VARCHAR({maxLength})' },
   { sqlServer: 'text', flink: 'STRING', starRocks: 'STRING' },
   { sqlServer: 'ntext', flink: 'STRING', starRocks: 'STRING' },
-  
+
   // Date/Time types
   { sqlServer: 'date', flink: 'DATE', starRocks: 'DATE' },
   { sqlServer: 'datetime', flink: 'TIMESTAMP(3)', starRocks: 'DATETIME' },
@@ -121,61 +63,22 @@ const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   { sqlServer: 'smalldatetime', flink: 'TIMESTAMP(0)', starRocks: 'DATETIME' },
   { sqlServer: 'time', flink: 'TIME({scale})', starRocks: 'TIME' },
   { sqlServer: 'datetimeoffset', flink: 'TIMESTAMP_LTZ({scale})', starRocks: 'DATETIME' },
-  
+
   // Boolean
   { sqlServer: 'bit', flink: 'BOOLEAN', starRocks: 'BOOLEAN' },
-  
+
   // Binary types
   { sqlServer: 'binary', flink: 'BINARY({maxLength})', starRocks: 'BINARY' },
-  { sqlServer: 'varbinary', flink: 'VARBINARY({maxLength})', starRocks: 'VARBINARY' },
-  { sqlServer: 'image', flink: 'BYTES', starRocks: 'VARBINARY' },
-  
+  { sqlServer: 'varbinary', flink: 'VARCHAR({maxLength_times_2})', starRocks: 'VARBINARY' },
+  { sqlServer: 'image', flink: 'VARCHAR(2000)', starRocks: 'VARBINARY' },
+
   // Other types
   { sqlServer: 'uniqueidentifier', flink: 'VARCHAR(36)', starRocks: 'VARCHAR(36)' },
   { sqlServer: 'xml', flink: 'STRING', starRocks: 'STRING' },
   { sqlServer: 'json', flink: 'STRING', starRocks: 'JSON' },
 ];
 
-// ============================================================================
-// Pattern Matcher
-// ============================================================================
-
-class PatternMatcher {
-  static matches(value: string, patterns?: string[]): boolean {
-    if (!patterns || patterns.length === 0) return true;
-    
-    return patterns.some(pattern => {
-      try {
-        const regex = new RegExp(pattern, 'i');
-        return regex.test(value);
-      } catch (error) {
-        console.warn(`Invalid regex pattern: ${pattern}`);
-        return false;
-      }
-    });
-  }
-
-  static shouldInclude(
-    value: string,
-    includePatterns?: string[],
-    excludePatterns?: string[]
-  ): boolean {
-    // If exclude patterns exist and match, exclude
-    if (excludePatterns && excludePatterns.length > 0) {
-      if (this.matches(value, excludePatterns)) {
-        return false;
-      }
-    }
-
-    // If include patterns exist, must match at least one
-    if (includePatterns && includePatterns.length > 0) {
-      return this.matches(value, includePatterns);
-    }
-
-    // No include patterns specified, include by default (unless excluded above)
-    return true;
-  }
-}
+const VARCHAR_MAX_LENGTH = 65535;
 
 // ============================================================================
 // Schema Extractor
@@ -184,7 +87,7 @@ class PatternMatcher {
 class SchemaExtractor {
   private connection: sql.ConnectionPool | null = null;
 
-  constructor(private config: DatabaseConfig) {}
+  constructor(private config: DatabaseConfig) { }
 
   async connect(): Promise<void> {
     const sqlConfig: MSSQLConfig = {
@@ -211,12 +114,16 @@ class SchemaExtractor {
     if (!this.connection) throw new Error('Not connected to database');
 
     const query = `
-      SELECT 
+      SELECT
         TABLE_SCHEMA as [schema],
         TABLE_NAME as tableName
       FROM INFORMATION_SCHEMA.TABLES
       WHERE TABLE_SCHEMA = @schema
         AND TABLE_TYPE = 'BASE TABLE'
+        AND TABLE_NAME NOT LIKE 'sys%'
+        AND TABLE_NAME NOT LIKE 'MS%'
+        AND TABLE_NAME NOT LIKE 'dt%'
+        AND TABLE_NAME NOT LIKE 'trace_%'
       ORDER BY TABLE_NAME
     `;
 
@@ -247,14 +154,22 @@ class SchemaExtractor {
     if (!this.connection) throw new Error('Not connected to database');
 
     const query = `
-      SELECT 
-        c.COLUMN_NAME as name,
-        c.DATA_TYPE as dataType,
-        c.IS_NULLABLE as isNullable,
-        c.CHARACTER_MAXIMUM_LENGTH as maxLength,
-        c.NUMERIC_PRECISION as precision,
-        c.NUMERIC_SCALE as scale
+      SELECT
+        c.COLUMN_NAME AS name,
+        c.DATA_TYPE AS dataType,
+        c.IS_NULLABLE AS isNullable,
+        c.CHARACTER_MAXIMUM_LENGTH AS maxLength,
+        c.NUMERIC_PRECISION AS precision,
+        c.NUMERIC_SCALE AS scale,
+        sc.is_computed AS isComputed,
+        cc.definition AS computedFormula
       FROM INFORMATION_SCHEMA.COLUMNS c
+      JOIN sys.columns sc
+        ON sc.object_id = OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME)
+        AND sc.name = c.COLUMN_NAME
+      LEFT JOIN sys.computed_columns cc
+        ON cc.object_id = sc.object_id
+        AND cc.column_id = sc.column_id
       WHERE c.TABLE_SCHEMA = @schema AND c.TABLE_NAME = @table
       ORDER BY c.ORDINAL_POSITION
     `;
@@ -268,9 +183,11 @@ class SchemaExtractor {
       name: row.name,
       sqlServerType: row.dataType.toLowerCase(),
       isNullable: row.isNullable === 'YES',
-      maxLength: row.maxLength,
+      maxLength: row.maxLength == -1 ? VARCHAR_MAX_LENGTH : row.maxLength,
       precision: row.precision,
       scale: row.scale,
+      isComputed: row.isComputed === true || row.isComputed === 1,
+      computedFormula: row.computedFormula,
     }));
 
     // Apply column patterns
@@ -344,6 +261,7 @@ class TypeMapper {
     // Replace placeholders
     targetType = targetType
       .replace('{maxLength}', column.maxLength?.toString() || '255')
+      .replace('{maxLength_times_2}', ((column.maxLength || 127) * 2).toString()) // For hex encoding of binary data
       .replace('{precision}', column.precision?.toString() || '10')
       .replace('{scale}', column.scale?.toString() || '0');
 
@@ -356,10 +274,18 @@ class TypeMapper {
 // ============================================================================
 
 class FlinkScriptGenerator {
-  constructor(private typeMapper: TypeMapper) {}
+  constructor(
+    private typeMapper: TypeMapper,
+    private databaseConfig: DatabaseConfig,
+    private starRocksConfig?: StarRocksConfig,
+    private flinkConfig?: FlinkConfig
+  ) { }
 
   generate(tableSchema: TableSchema, override?: TableOverride): string {
     let columns = [...tableSchema.columns];
+
+    // Exclude computed columns from Flink CDC source (CDC cannot capture computed columns)
+    columns = columns.filter(col => !col.isComputed);
 
     // Apply column filters from override
     if (override) {
@@ -378,68 +304,245 @@ class FlinkScriptGenerator {
       return `  \`${col.name}\` ${flinkType}${nullable}`;
     });
 
-    const primaryKey = override?.primaryKey || tableSchema.primaryKey;
+    let primaryKey = override?.primaryKey || tableSchema.primaryKey;
+
+    // Sort primary key columns by their position in the schema
+    if (primaryKey.length > 0) {
+      const columnOrder = new Map(columns.map((col, idx) => [col.name, idx]));
+      primaryKey = [...primaryKey].sort((a, b) => {
+        const posA = columnOrder.get(a) ?? 999;
+        const posB = columnOrder.get(b) ?? 999;
+        return posA - posB;
+      });
+    }
+
     const pk = primaryKey.length > 0
       ? `,\n  PRIMARY KEY (${primaryKey.map(k => `\`${k}\``).join(', ')}) NOT ENFORCED`
       : '';
 
-    const tableName = `${tableSchema.schema}_${tableSchema.table}`;
+    // Resolve SQL Server connection details from config
+    // Use serverHostname for Flink CDC if available, otherwise fall back to server
+    const hostname = this.databaseConfig.serverHostname
+      ? resolveEnvVars(this.databaseConfig.serverHostname)
+      : resolveEnvVars(this.databaseConfig.server);
+    const port = this.databaseConfig.port || 1433;
+    const username = resolveEnvVars(this.databaseConfig.user);
+    const password = resolveEnvVars(this.databaseConfig.password);
+    const database = resolveEnvVars(this.databaseConfig.database);
 
-    return `-- Flink CDC Source Table for ${tableSchema.schema}.${tableSchema.table}
+    // Full table name: dbo.tablename_mssql
+    const fullTableName = `${tableSchema.schema}.${tableSchema.table}_mssql`;
+
+    return `-- ============================================================================
+-- Flink CDC Source Table for ${tableSchema.schema}.${tableSchema.table}
+-- ============================================================================
+-- IMPORTANT: This script should be executed in Apache Flink SQL Client
+-- DO NOT run this script in StarRocks - it uses Flink-specific types and connectors
+--
 -- Generated: ${tableSchema.timestamp}
 -- Checksum: ${tableSchema.checksum}
+-- ============================================================================
 
-CREATE TABLE \`${tableName}\` (
+CREATE DATABASE IF NOT EXISTS \`default_catalog\`.\`${database}\`;
+
+CREATE TABLE IF NOT EXISTS \`default_catalog\`.\`${database}\`.\`${fullTableName}\` (
 ${columnDefs.join(',\n')}${pk}
 ) WITH (
   'connector' = 'sqlserver-cdc',
-  'hostname' = '<YOUR_SQL_SERVER_HOST>',
-  'port' = '1433',
-  'username' = '<USERNAME>',
-  'password' = '<PASSWORD>',
-  'database-name' = '<DATABASE>',
-  'schema-name' = '${tableSchema.schema}',
-  'table-name' = '${tableSchema.table}',
-  
+  'hostname' = '${hostname}',
+  'port' = '${port}',
+  'username' = '${username}',
+  'password' = '${password}',
+  'database-name' = '${database}',
+  'table-name' = 'dbo.${tableSchema.table}',
+
   -- CDC Configuration
   'scan.incremental.snapshot.enabled' = 'true',
-  'scan.incremental.snapshot.chunk.size' = '8096',
+  'scan.incremental.snapshot.chunk.size' = '10000',
+  ${primaryKey.length > 0 ? `'scan.incremental.snapshot.chunk.key-column' = '${primaryKey[0]}',` : ''}
   'scan.snapshot.fetch.size' = '1024',
   'connect.timeout' = '30s',
   'connect.max-retries' = '3',
   'connection.pool.size' = '20',
-  'heartbeat.interval' = '30s',
-  
+  'scan.startup.mode' = 'initial',
+
   -- Debezium Configuration for Exactly-Once Semantics
   'debezium.snapshot.mode' = 'initial',
-  'debezium.snapshot.locking.mode' = 'none',
+  'debezium.snapshot.locking.mode' = 'minimal',
+  'debezium.snapshot.lock.timeout.ms' = '120000',
+  'debezium.snapshot.lock.acquire.timeout.ms' = '120000',
+  'debezium.snapshot.isolation.mode' = 'read_uncommitted',
+  'debezium.database.query.timeout.ms' = '120000',
   'debezium.database.history.store.only.captured.tables.ddl' = 'true'
 );
 `;
   }
 
-  generateJobConfig(jobName: string): string {
+  generateStarRocksSink(tableSchema: TableSchema, override?: TableOverride): string {
+    let columns = [...tableSchema.columns];
+
+    // Exclude computed columns from Flink sink (to match CDC source)
+    columns = columns.filter(col => !col.isComputed);
+
+    // Apply column filters from override
+    if (override) {
+      if (override.excludeColumns && override.excludeColumns.length > 0) {
+        columns = columns.filter(col => !override.excludeColumns!.includes(col.name));
+      }
+      if (override.includeColumns && override.includeColumns.length > 0) {
+        columns = columns.filter(col => override.includeColumns!.includes(col.name));
+      }
+    }
+
+    const columnDefs = columns.map(col => {
+      const customMapping = override?.customMappings?.[col.name]?.flink;
+      const flinkType = this.typeMapper.mapType(col, 'flink', customMapping);
+      const nullable = col.isNullable ? '' : ' NOT NULL';
+      return `  \`${col.name}\` ${flinkType}${nullable}`;
+    });
+
+    let primaryKey = override?.primaryKey || tableSchema.primaryKey;
+
+    // Sort primary key columns by their position in the schema
+    if (primaryKey.length > 0) {
+      const columnOrder = new Map(columns.map((col, idx) => [col.name, idx]));
+      primaryKey = [...primaryKey].sort((a, b) => {
+        const posA = columnOrder.get(a) ?? 999;
+        const posB = columnOrder.get(b) ?? 999;
+        return posA - posB;
+      });
+    }
+
+    const pk = primaryKey.length > 0
+      ? `,\n  PRIMARY KEY (${primaryKey.map(k => `\`${k}\``).join(', ')}) NOT ENFORCED`
+      : '';
+
+    // Full sink table name: dbo.tablename_sink
+    const sinkTableName = `${tableSchema.schema}.${tableSchema.table}_sink`;
+    // StarRocks table name without schema prefix
+    const starRocksTableName = tableSchema.table;
+    // Flink database name (from config)
+    const flinkDbName = resolveEnvVars(this.databaseConfig.database);
+
+    // Resolve StarRocks connection details from config or use placeholders
+    let feHost: string;
+    let jdbcPort: number;
+    let loadPort: number;
+    let database: string;
+    let username: string;
+    let password: string;
+
+    if (this.starRocksConfig) {
+      feHost = resolveEnvVars(this.starRocksConfig.feHost);
+      jdbcPort = this.starRocksConfig.jdbcPort || 9030;
+      loadPort = this.starRocksConfig.loadPort || 8030;
+      database = resolveEnvVars(this.starRocksConfig.database);
+      username = resolveEnvVars(this.starRocksConfig.username);
+      password = resolveEnvVars(this.starRocksConfig.password);
+    } else {
+      feHost = '<STARROCKS_FE_HOST>';
+      jdbcPort = 9030;
+      loadPort = 8030;
+      database = '<STARROCKS_DATABASE>';
+      username = '<STARROCKS_USERNAME>';
+      password = '<STARROCKS_PASSWORD>';
+    }
+
+    return `-- ============================================================================
+-- Flink StarRocks Sink Table for ${tableSchema.schema}.${tableSchema.table}
+-- ============================================================================
+-- This is a Flink connector table that writes to StarRocks
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS \`default_catalog\`.\`${flinkDbName}\`.\`${sinkTableName}\` (
+${columnDefs.join(',\n')}${pk}
+) WITH (
+  'connector' = 'starrocks',
+  'jdbc-url' = 'jdbc:mysql://${feHost}:${jdbcPort}',
+  'load-url' = '${feHost}:${loadPort}',
+  'database-name' = '${database}',
+  'table-name' = '${starRocksTableName}',
+  'username' = '${username}',
+  'password' = '${password}',
+
+  -- Stream Load Configuration
+  'sink.buffer-flush.max-rows' = '500000',
+  'sink.buffer-flush.max-bytes' = '104857600',  -- 100MB
+  'sink.buffer-flush.interval-ms' = '10000',    -- 10 seconds
+  'sink.max-retries' = '3',
+  'sink.parallelism' = '1',
+
+  -- Stream Load Properties
+  'sink.properties.format' = 'json',
+  'sink.properties.strip_outer_array' = 'true'
+);
+`;
+  }
+
+  generateInsertStatement(tableSchema: TableSchema, override?: TableOverride): string {
+    const database = resolveEnvVars(this.databaseConfig.database);
+    const sourceTableName = `\`default_catalog\`.\`${database}\`.\`${tableSchema.schema}.${tableSchema.table}_mssql\``;
+    const sinkTableName = `\`default_catalog\`.\`${database}\`.\`${tableSchema.schema}.${tableSchema.table}_sink\``;
+
+    // Apply column filters from override (same logic as in generate() and generateStarRocksSink())
+    let columns = [...tableSchema.columns];
+
+    // Exclude computed columns (to match CDC source and sink tables)
+    columns = columns.filter(col => !col.isComputed);
+
+    if (override) {
+      if (override.excludeColumns && override.excludeColumns.length > 0) {
+        columns = columns.filter(col => !override.excludeColumns!.includes(col.name));
+      }
+      if (override.includeColumns && override.includeColumns.length > 0) {
+        columns = columns.filter(col => override.includeColumns!.includes(col.name));
+      }
+    }
+
+    // Build explicit column list
+    const columnList = columns.map(col => `\`${col.name}\``).join(', ');
+
+    return `  -- Sync: ${tableSchema.schema}.${tableSchema.table}
+  INSERT INTO ${sinkTableName} (${columnList})
+  SELECT ${columnList}
+  FROM ${sourceTableName};
+`;
+  }
+
+  generateJobConfig(jobName: string, databaseName: string): string {
+    // Resolve checkpoint and savepoint directories from config
+    let checkpointDir = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints';
+    let savepointDir = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints';
+
+    if (this.flinkConfig) {
+      checkpointDir = resolveEnvVars(this.flinkConfig.checkpointDir);
+      savepointDir = resolveEnvVars(this.flinkConfig.savepointDir);
+    }
+
+    // Append jobName_databaseName to the directory paths
+    const fullCheckpointDir = `${checkpointDir}/${jobName}`;
+    const fullSavepointDir = `${savepointDir}/${jobName}`;
+
     return `-- =============================================================================
 -- Flink Job Configuration for ${jobName}
 -- =============================================================================
--- 
+--
 -- NOTE: Your cluster already has checkpoint configuration in flink-conf.yaml:
 --   - Checkpoint Interval: 30s
 --   - Mode: EXACTLY_ONCE
 --   - State Backend: RocksDB
---   - Storage: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/
+--   - Storage: ${checkpointDir}/
 --
 -- The settings below are OPTIONAL job-specific overrides.
 -- Comment out or remove settings you want to inherit from cluster config.
 --
 -- =============================================================================
 
--- ===== OPTIONAL: Job-Specific Storage Paths =====
+-- ===== Job-Specific Storage Paths =====
 -- Organize checkpoints and savepoints by job name
--- Uncomment to override cluster defaults:
-
--- SET 'state.checkpoints.dir' = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints/${jobName}';
--- SET 'state.savepoints.dir' = 'wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}';
+SET 'state.checkpoints.dir' = '${fullCheckpointDir}';
+SET 'state.savepoints.dir' = '${fullSavepointDir}';
+SET 'pipeline.name' = '${jobName}';
 
 -- ===== OPTIONAL: Job-Specific Checkpoint Interval =====
 -- Cluster default is 30s. Uncomment to override for this job:
@@ -469,17 +572,17 @@ SET 'table.exec.source.idle-timeout' = '30s';
 -- =============================================================================
 --
 -- Your cluster automatically resumes from latest checkpoint on restart.
--- Checkpoints are stored in: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints
+-- Checkpoints are stored in: ${fullCheckpointDir}
 --
 -- To list checkpoints for this job:
 --   az storage blob list --account-name coolr0flink0starrocks --container-name flink --prefix checkpoints/${jobName}
 --
 -- To create a savepoint manually:
 --   flink savepoint <job-id>
---   # Savepoint will be stored in: wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}
+--   # Savepoint will be stored in: ${fullSavepointDir}
 --
 -- To resume from a specific savepoint:
---   flink run -s wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints/${jobName}/savepoint-123456 -d your-job.jar
+--   flink run -s ${fullSavepointDir}/savepoint-123456 -d your-job.jar
 --
 -- To list savepoints:
 --   az storage blob list --account-name coolr0flink0starrocks --container-name flink --prefix savepoints/${jobName}
@@ -491,7 +594,45 @@ SET 'table.exec.source.idle-timeout' = '30s';
 }
 
 class StarRocksScriptGenerator {
-  constructor(private typeMapper: TypeMapper) {}
+  constructor(private typeMapper: TypeMapper, private databaseName: string) { }
+
+  /**
+   * Extract computed column information for ALTER statement generation
+   */
+  extractComputedColumns(tableSchema: TableSchema, override?: TableOverride): Array<{
+    schema: string;
+    table: string;
+    column: ColumnInfo;
+  }> {
+    let columns = [...tableSchema.columns];
+
+    // Apply column filters from override
+    if (override) {
+      if (override.excludeColumns && override.excludeColumns.length > 0) {
+        columns = columns.filter(col => !override.excludeColumns!.includes(col.name));
+      }
+      if (override.includeColumns && override.includeColumns.length > 0) {
+        columns = columns.filter(col => override.includeColumns!.includes(col.name));
+      }
+    }
+
+    const computedColumns = columns.filter(col => col.isComputed);
+    const result: Array<{
+      schema: string;
+      table: string;
+      column: ColumnInfo;
+    }> = [];
+
+    for (const col of computedColumns) {
+      result.push({
+        schema: tableSchema.schema,
+        table: tableSchema.table,
+        column: col,
+      });
+    }
+
+    return result;
+  }
 
   generate(tableSchema: TableSchema, override?: TableOverride): string {
     let columns = [...tableSchema.columns];
@@ -506,32 +647,71 @@ class StarRocksScriptGenerator {
       }
     }
 
-    const columnDefs = columns.map(col => {
+    // Determine primary key columns first (needed for reordering)
+    let primaryKey = override?.primaryKey || tableSchema.primaryKey;
+    const primaryKeySet = new Set(primaryKey);
+
+    // Separate computed and regular columns
+    // IMPORTANT: StarRocks computed columns should NOT be in CREATE TABLE
+    // They will be added later via ALTER TABLE statements
+    const regularColumns = columns.filter(col => !col.isComputed);
+
+    // Reorder regular columns: primary key columns first, then others
+    // StarRocks requires PRIMARY KEY columns to be the first columns in the schema
+    const pkColumns = regularColumns.filter(col => primaryKeySet.has(col.name));
+    const nonPkColumns = regularColumns.filter(col => !primaryKeySet.has(col.name));
+    const reorderedRegularColumns = [...pkColumns, ...nonPkColumns];
+
+    // Map regular columns (already reordered)
+    const regularColumnDefs = reorderedRegularColumns.map(col => {
       const customMapping = override?.customMappings?.[col.name]?.starRocks;
       const starRocksType = this.typeMapper.mapType(col, 'starRocks', customMapping);
       const nullable = col.isNullable ? 'NULL' : 'NOT NULL';
       return `  \`${col.name}\` ${starRocksType} ${nullable}`;
     });
 
-    const primaryKey = override?.primaryKey || tableSchema.primaryKey;
+    // Use only regular columns for CREATE TABLE
+    // Computed columns will be added via ALTER TABLE in the separate file
+    const allColumnDefs = regularColumnDefs;
+
+    // Sort primary key columns by their position in the schema (already determined above)
+    if (primaryKey.length > 0) {
+      const columnOrder = new Map(columns.map((col, idx) => [col.name, idx]));
+      primaryKey = [...primaryKey].sort((a, b) => {
+        const posA = columnOrder.get(a) ?? 999;
+        const posB = columnOrder.get(b) ?? 999;
+        return posA - posB;
+      });
+    }
+
     const pk = primaryKey.length > 0
       ? primaryKey.map(k => `\`${k}\``).join(', ')
-      : columns[0]?.name || 'id';
+      : reorderedRegularColumns[0]?.name || 'id';
 
-    const tableName = `${tableSchema.schema}_${tableSchema.table}`;
+    // Table name without schema prefix (dbo_)
+    const tableName = tableSchema.table;
 
-    return `-- StarRocks Target Table for ${tableSchema.schema}.${tableSchema.table}
+    // Database name with hyphens replaced by underscores
+    const dbName = this.databaseName.replace(/-/g, '_');
+
+    return `-- ============================================================================
+-- StarRocks Target Table for ${tableSchema.schema}.${tableSchema.table}
+-- ============================================================================
+-- IMPORTANT: This script should be executed in StarRocks SQL Client
+-- DO NOT run this script in Flink - it uses StarRocks-specific types and syntax
+--
 -- Generated: ${tableSchema.timestamp}
 -- Checksum: ${tableSchema.checksum}
+-- ============================================================================
 
-CREATE TABLE IF NOT EXISTS \`${tableName}\` (
-${columnDefs.join(',\n')}
-)
-PRIMARY KEY (${pk})
-DISTRIBUTED BY HASH(${pk})
+CREATE TABLE IF NOT EXISTS \`${dbName}\`.\`${tableName}\` (
+${allColumnDefs.join(',\n')}
+) ENGINE=olap
+PRIMARY KEY(${pk})
+COMMENT ""
+DISTRIBUTED BY HASH(${pk}) BUCKETS 1
 PROPERTIES (
-  "replication_num" = "3",
-  "storage_format" = "DEFAULT"
+  "replication_num" = "1"
 );
 `;
   }
@@ -597,32 +777,150 @@ class MigrationScriptGenerator {
   private starRocksGenerator: StarRocksScriptGenerator;
   private changeDetector: SchemaChangeDetector;
 
+  // Static property to collect all computed columns across all generators
+  private static globalComputedColumns: Array<{
+    schema: string;
+    table: string;
+    column: ColumnInfo;
+    jobName: string;
+  }> = [];
+
   constructor(private config: SchemaConfig) {
     this.extractor = new SchemaExtractor(config.database);
     this.typeMapper = new TypeMapper(config.typeMappings);
-    this.flinkGenerator = new FlinkScriptGenerator(this.typeMapper);
-    this.starRocksGenerator = new StarRocksScriptGenerator(this.typeMapper);
+    this.flinkGenerator = new FlinkScriptGenerator(this.typeMapper, config.database, config.starRocks, config.flink);
+    this.starRocksGenerator = new StarRocksScriptGenerator(this.typeMapper, config.database.database);
     this.changeDetector = new SchemaChangeDetector();
   }
+
+  /**
+   * Get environment-aware output paths
+   */
+  private getEnvironmentOutputPaths() {
+    const environment = this.config.environment || 'default';
+    return {
+      flinkPath: path.join(this.config.output.flinkPath, environment),
+      starRocksPath: path.join(this.config.output.starRocksPath, environment),
+      checksumPath: path.join(this.config.output.checksumPath, environment)
+    };
+  }
+
+  /**
+   * Reset the global computed columns collection
+   */
+  static resetGlobalComputedColumns(): void {
+    MigrationScriptGenerator.globalComputedColumns = [];
+  }
+
+  /**
+   * Generate a single MSSQL ALTER statements file for all computed columns
+   */
+  static generateGlobalComputedColumnsFile(outputDir: string, environment?: string): string | null {
+    if (MigrationScriptGenerator.globalComputedColumns.length === 0) {
+      return null;
+    }
+
+    let computedColumnsScript = `-- ============================================================================\n`;
+    computedColumnsScript += `-- MSSQL ALTER Statements for All Computed Columns\n`;
+    computedColumnsScript += `-- ============================================================================\n`;
+    computedColumnsScript += `-- IMPORTANT: This script contains ALTER statements in MSSQL format\n`;
+    computedColumnsScript += `-- Execute this script in SQL Server Management Studio (SSMS)\n`;
+    computedColumnsScript += `-- These statements add computed columns to MSSQL tables\n`;
+    computedColumnsScript += `--\n`;
+    computedColumnsScript += `-- Generated: ${new Date().toISOString()}\n`;
+    computedColumnsScript += `-- Total Computed Columns: ${MigrationScriptGenerator.globalComputedColumns.length}\n`;
+    computedColumnsScript += `-- ============================================================================\n\n`;
+
+    // Group by table
+    const columnsByTable = new Map<string, typeof MigrationScriptGenerator.globalComputedColumns>();
+    for (const col of MigrationScriptGenerator.globalComputedColumns) {
+      const tableKey = `${col.schema}.${col.table}`;
+      if (!columnsByTable.has(tableKey)) {
+        columnsByTable.set(tableKey, []);
+      }
+      columnsByTable.get(tableKey)!.push(col);
+    }
+
+    // Generate ALTER statements for each table
+    for (const [tableKey, columns] of columnsByTable) {
+      computedColumnsScript += `-- ============================================================================\n`;
+      computedColumnsScript += `-- Table: ${tableKey}\n`;
+      computedColumnsScript += `-- Computed Columns: ${columns.length}\n`;
+      computedColumnsScript += `-- Jobs: ${[...new Set(columns.map(c => c.jobName))].join(', ')}\n`;
+      computedColumnsScript += `-- ============================================================================\n\n`;
+
+      for (const col of columns) {
+        // Use the original MSSQL formula from the column
+        const mssqlFormula = col.column.computedFormula || '';
+
+        computedColumnsScript += `-- Column: ${col.column.name}\n`;
+        computedColumnsScript += `-- Type: ${col.column.sqlServerType}\n`;
+        computedColumnsScript += `-- Job: ${col.jobName}\n`;
+        computedColumnsScript += `ALTER TABLE [${col.schema}].[${col.table}]\n`;
+        computedColumnsScript += `ADD [${col.column.name}] AS ${mssqlFormula};\n`;
+        computedColumnsScript += `GO\n\n`;
+      }
+    }
+
+    // Create environment-specific directory if needed
+    const envOutputDir = environment ? path.join(outputDir, environment) : outputDir;
+    fs.mkdirSync(envOutputDir, { recursive: true });
+
+    const computedColumnsFile = path.join(envOutputDir, 'all_computed_columns_mssql.sql');
+    fs.writeFileSync(computedColumnsFile, computedColumnsScript);
+
+    return computedColumnsFile;
+  }
+
+
+  // Removed generateConvertedComputedColumnsFile method - MySQL conversion no longer needed
 
   async generate(detectChanges: boolean = false): Promise<void> {
     await this.extractor.connect();
 
     const allSchemas: Record<string, TableSchema> = {};
-    const jobName = this.config.jobName || this.config.schema;
-    
-    let flinkScript = this.flinkGenerator.generateJobConfig(jobName);
-    flinkScript += `-- Flink CDC Table Definitions for ${this.config.schema}\n`;
-    if (this.config.jobName) {
-      flinkScript += `-- Job: ${this.config.jobName}\n`;
-    }
-    flinkScript += `\n`;
-    
-    let starRocksScript = `-- StarRocks Table Definitions for ${this.config.schema}\n`;
+    const databaseName = this.config.database.database;
+    const baseJobName = this.config.jobName || this.config.schema;
+    const jobName = `${baseJobName}_${databaseName}`;
+
+    // Database name with hyphens replaced by underscores
+    const starRocksDbName = databaseName.replace(/-/g, '_');
+
+    let starRocksScript = `-- ============================================================================\n`;
+    starRocksScript += `-- StarRocks Table Definitions for ${this.config.schema}\n`;
     if (this.config.jobName) {
       starRocksScript += `-- Job: ${this.config.jobName}\n`;
     }
-    starRocksScript += `\n`;
+    starRocksScript += `-- ============================================================================\n\n`;
+    starRocksScript += `-- Create database if not exists\n`;
+    starRocksScript += `CREATE DATABASE IF NOT EXISTS \`${starRocksDbName}\`;\n\n`;
+
+    // Array to track all computed columns for ALTER statement generation
+    const allComputedColumns: Array<{
+      schema: string;
+      table: string;
+      column: ColumnInfo;
+    }> = [];
+
+    // Complete pipeline script
+    let pipelineScript = this.flinkGenerator.generateJobConfig(jobName, databaseName);
+    pipelineScript += `-- =============================================================================\n`;
+    pipelineScript += `-- Complete Flink CDC Pipeline for ${this.config.schema}\n`;
+    if (this.config.jobName) {
+      pipelineScript += `-- Job: ${this.config.jobName}\n`;
+    }
+    pipelineScript += `--\n`;
+    pipelineScript += `-- This script contains:\n`;
+    pipelineScript += `--   1. MSSQL CDC source tables\n`;
+    pipelineScript += `--   2. StarRocks sink tables (Flink connectors)\n`;
+    pipelineScript += `--   3. INSERT statements for data synchronization\n`;
+    pipelineScript += `--\n`;
+    pipelineScript += `-- Prerequisites:\n`;
+    pipelineScript += `--   - StarRocks tables must be created first (run {jobname}_starrocks.sql in StarRocks)\n`;
+    pipelineScript += `--   - Update connection parameters (marked with <...>)\n`;
+    pipelineScript += `--   - Required Flink dependencies must be in lib/ folder\n`;
+    pipelineScript += `--\n`;
+    pipelineScript += `-- =============================================================================\n\n`;
 
     console.log(`\n📋 Processing schema: ${this.config.schema}`);
     if (this.config.jobName) {
@@ -640,6 +938,9 @@ class MigrationScriptGenerator {
     if (tables.length === 0) {
       console.warn(`⚠️  No tables found matching the specified patterns`);
     }
+
+    // Store table schemas and overrides for pipeline generation
+    const tableSchemas: Array<{ schema: TableSchema; override?: TableOverride }> = [];
 
     for (const tableMetadata of tables) {
       console.log(`\n   Processing table: ${tableMetadata.table}`);
@@ -665,9 +966,21 @@ class MigrationScriptGenerator {
       console.log(`      Primary Key: ${schema.primaryKey.join(', ') || 'none'}`);
 
       allSchemas[`${schema.schema}.${schema.table}`] = schema;
+      tableSchemas.push({ schema, override });
 
-      flinkScript += this.flinkGenerator.generate(schema, override) + '\n';
       starRocksScript += this.starRocksGenerator.generate(schema, override) + '\n';
+
+      // Extract computed columns for global ALTER statement generation
+      const computedCols = this.starRocksGenerator.extractComputedColumns(schema, override);
+      allComputedColumns.push(...computedCols);
+
+      // Add to global collection with job name
+      for (const col of computedCols) {
+        MigrationScriptGenerator.globalComputedColumns.push({
+          ...col,
+          jobName,
+        });
+      }
 
       // Detect changes if requested
       if (detectChanges) {
@@ -693,25 +1006,68 @@ class MigrationScriptGenerator {
       }
     }
 
+    // Generate complete pipeline script
+    pipelineScript += `-- =============================================================================\n`;
+    pipelineScript += `-- SECTION 1: MSSQL CDC Source Tables\n`;
+    pipelineScript += `-- =============================================================================\n\n`;
+
+    for (const { schema, override } of tableSchemas) {
+      pipelineScript += this.flinkGenerator.generate(schema, override) + '\n';
+    }
+
+    pipelineScript += `\n-- =============================================================================\n`;
+    pipelineScript += `-- SECTION 2: StarRocks Sink Tables (Flink Connectors)\n`;
+    pipelineScript += `-- =============================================================================\n\n`;
+
+    for (const { schema, override } of tableSchemas) {
+      pipelineScript += this.flinkGenerator.generateStarRocksSink(schema, override) + '\n';
+    }
+
+    pipelineScript += `\n-- =============================================================================\n`;
+    pipelineScript += `-- SECTION 3: Data Synchronization (Single Job)\n`;
+    pipelineScript += `-- =============================================================================\n`;
+    pipelineScript += `-- All INSERT statements run as a SINGLE Flink job using STATEMENT SET.\n`;
+    pipelineScript += `-- This ensures all tables are synchronized together with shared checkpointing.\n`;
+    pipelineScript += `--\n`;
+    pipelineScript += `-- To execute:\n`;
+    pipelineScript += `--   ./bin/sql-client.sh -f ${jobName}.sql\n`;
+    pipelineScript += `--\n`;
+    pipelineScript += `-- Or submit via SQL Client:\n`;
+    pipelineScript += `--   ./bin/sql-client.sh\n`;
+    pipelineScript += `--   Flink SQL> SOURCE '${jobName}.sql';\n`;
+    pipelineScript += `-- =============================================================================\n\n`;
+
+    pipelineScript += `EXECUTE STATEMENT SET\nBEGIN\n\n`;
+
+    for (const { schema, override } of tableSchemas) {
+      pipelineScript += this.flinkGenerator.generateInsertStatement(schema, override) + '\n';
+    }
+
+    pipelineScript += `END;\n`;
+
     await this.extractor.disconnect();
 
-    // Write output files
-    fs.mkdirSync(this.config.output.flinkPath, { recursive: true });
-    fs.mkdirSync(this.config.output.starRocksPath, { recursive: true });
-    fs.mkdirSync(this.config.output.checksumPath, { recursive: true });
+    // Write output files (environment-aware)
+    const envPaths = this.getEnvironmentOutputPaths();
+    fs.mkdirSync(envPaths.flinkPath, { recursive: true });
+    fs.mkdirSync(envPaths.starRocksPath, { recursive: true });
+    fs.mkdirSync(envPaths.checksumPath, { recursive: true });
 
-    const flinkFile = path.join(this.config.output.flinkPath, `${jobName}_flink.sql`);
-    const starRocksFile = path.join(this.config.output.starRocksPath, `${jobName}_starrocks.sql`);
-    const checksumFile = path.join(this.config.output.checksumPath, `${jobName}_checksums.json`);
+    const flinkFile = path.join(envPaths.flinkPath, `${jobName}.sql`);
+    const starRocksFile = path.join(envPaths.starRocksPath, `${jobName}_starrocks.sql`);
+    const checksumFile = path.join(envPaths.checksumPath, `${jobName}_checksums.json`);
 
-    fs.writeFileSync(flinkFile, flinkScript);
+    fs.writeFileSync(flinkFile, pipelineScript);
     fs.writeFileSync(starRocksFile, starRocksScript);
     fs.writeFileSync(checksumFile, JSON.stringify(allSchemas, null, 2));
 
     console.log(`\n✅ Scripts generated successfully!`);
-    console.log(`   Flink: ${flinkFile}`);
-    console.log(`   StarRocks: ${starRocksFile}`);
+    console.log(`   Flink CDC Pipeline: ${flinkFile}`);
+    console.log(`   StarRocks DDL: ${starRocksFile}`);
     console.log(`   Checksums: ${checksumFile}`);
+    if (allComputedColumns.length > 0) {
+      console.log(`   Computed Columns in this job: ${allComputedColumns.length}`);
+    }
   }
 }
 
@@ -739,8 +1095,20 @@ program
         ? yaml.load(configContent) as SchemaConfig
         : JSON.parse(configContent);
 
+      // Reset global computed columns collection
+      MigrationScriptGenerator.resetGlobalComputedColumns();
+
       const generator = new MigrationScriptGenerator(config);
       await generator.generate(options.detectChanges);
+
+      // Generate single file with computed columns
+      const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(config.output.starRocksPath, config.environment);
+
+      if (computedColumnsFile) {
+        console.log(`\n📝 Computed Columns Summary:`);
+        console.log(`   All Computed Columns (MSSQL): ${computedColumnsFile}`);
+        console.log(`   Total Computed Columns: ${MigrationScriptGenerator['globalComputedColumns'].length}`);
+      }
     } catch (error) {
       console.error('❌ Error:', error);
       process.exit(1);
@@ -755,7 +1123,7 @@ program
   .action(async (options) => {
     try {
       const configDir = options.configDir;
-      const configFiles = glob.sync(path.join(configDir, '**/*.{yaml,yml,json}'));
+      const configFiles = glob.sync(path.join(configDir, '**/*.{yaml,yml}'));
 
       if (configFiles.length === 0) {
         console.log(`No config files found in ${configDir}`);
@@ -763,6 +1131,13 @@ program
       }
 
       console.log(`\n🚀 Found ${configFiles.length} schema configuration(s)\n`);
+
+      // Reset global computed columns collection
+      MigrationScriptGenerator.resetGlobalComputedColumns();
+
+      // Determine output directory and environment from first config file
+      let starRocksOutputDir: string | null = null;
+      let environment: string = 'default';
 
       for (const configFile of configFiles) {
         console.log(`\n${'='.repeat(80)}`);
@@ -774,13 +1149,157 @@ program
           ? JSON.parse(configContent)
           : yaml.load(configContent) as SchemaConfig;
 
+        // Store the output directory from the first config (with environment awareness)
+        if (!starRocksOutputDir) {
+          environment = config.environment || 'default';
+          starRocksOutputDir = path.join(config.output.starRocksPath, environment);
+        }
+
         const generator = new MigrationScriptGenerator(config);
         await generator.generate(options.detectChanges);
+      }
+
+      // Generate single file with all computed columns
+      if (starRocksOutputDir) {
+        // Pass the base output directory and environment separately for proper organization
+        const baseOutputDir = path.dirname(starRocksOutputDir);
+        const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(baseOutputDir, environment);
+
+        if (computedColumnsFile) {
+          console.log(`\n\n📝 Computed Columns Summary:`);
+          console.log(`   All Computed Columns (MSSQL): ${computedColumnsFile}`);
+          console.log(`   Total Computed Columns: ${MigrationScriptGenerator['globalComputedColumns'].length}`);
+        }
       }
 
       console.log(`\n\n✅ All schemas processed successfully!`);
     } catch (error) {
       console.error('❌ Error:', error);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('analyze-io')
+  .description('Analyze table I/O patterns and auto-generate optimized config files')
+  .requiredOption('-b, --base-config <path>', 'Path to base configuration file (YAML or JSON)')
+  .option('-o, --output-dir <path>', 'Output directory for generated configs', './configs')
+  .option('--high-threshold <number>', 'I/O operations threshold for high category')
+  .option('--low-threshold <number>', 'I/O operations threshold for low category')
+  .option('--max-tables-per-job <number>', 'Maximum tables per job config', '10')
+  .option('--no-group-by-domain', 'Disable domain-based table grouping')
+  .option('--report-only', 'Generate analysis report only (no config files)', false)
+  .action(async (options) => {
+    try {
+      // Load base config
+      const baseConfigPath = options.baseConfig;
+      if (!fs.existsSync(baseConfigPath)) {
+        console.error(`❌ Base config file not found: ${baseConfigPath}`);
+        console.log('\n💡 Create a base config file with your database credentials:');
+        console.log('   See: configs/base_config.yaml for configuration format');
+        process.exit(1);
+      }
+
+      const baseConfigContent = fs.readFileSync(baseConfigPath, 'utf-8');
+      const baseConfig = baseConfigPath.endsWith('.yaml') || baseConfigPath.endsWith('.yml')
+        ? yaml.load(baseConfigContent) as SchemaConfig
+        : JSON.parse(baseConfigContent);
+
+      // Parse thresholds
+      // Parse thresholds with priority: CLI args > Config file > Defaults
+      let highIOThreshold = options.highThreshold ? parseInt(options.highThreshold) : undefined;
+      let lowIOThreshold = options.lowThreshold ? parseInt(options.lowThreshold) : undefined;
+
+      // Use config values if CLI args are missing
+      if (highIOThreshold === undefined && baseConfig.ioAnalysis?.thresholds?.high) {
+        highIOThreshold = baseConfig.ioAnalysis.thresholds.high;
+      }
+
+      if (lowIOThreshold === undefined && baseConfig.ioAnalysis?.thresholds?.low) {
+        lowIOThreshold = baseConfig.ioAnalysis.thresholds.low;
+      }
+
+      // Apply defaults if still undefined
+      highIOThreshold = highIOThreshold || 100000;
+      lowIOThreshold = lowIOThreshold || 10000;
+
+      const maxTablesPerJob = parseInt(options.maxTablesPerJob);
+
+      if (isNaN(highIOThreshold) || isNaN(lowIOThreshold) || isNaN(maxTablesPerJob)) {
+        console.error('❌ Invalid threshold or max-tables-per-job value');
+        process.exit(1);
+      }
+
+      console.log(`\n🔍 I/O Analysis Configuration:`);
+      console.log(`   High I/O Threshold:     >${highIOThreshold.toLocaleString()} operations`);
+      console.log(`   Low I/O Threshold:      <${lowIOThreshold.toLocaleString()} operations`);
+      console.log(`   Max Tables Per Job:     ${maxTablesPerJob}`);
+      console.log(`   Group By Domain:        ${options.groupByDomain ? 'Yes' : 'No'}`);
+
+      // Initialize analyzer
+      const analyzer = new IOAnalyzer(baseConfig.database);
+      await analyzer.connect();
+
+      // Prepare exclude list from global config
+      const excludeTables = baseConfig.global?.tables?.exclude || [];
+
+      if (excludeTables.length > 0) {
+        console.log(`   Excluding Tables:       ${excludeTables.join(', ')}`);
+      }
+
+      // Analyze I/O patterns
+      const tables = await analyzer.analyzeTableIO(baseConfig.schema, {
+        highIOThreshold,
+        lowIOThreshold,
+        excludeTables,
+      });
+
+      await analyzer.disconnect();
+
+      // Display summary
+      analyzer.displaySummary(tables, { highIOThreshold, lowIOThreshold });
+
+      // Generate report
+      const report = analyzer.generateReport(tables, baseConfig.schema, {
+        highIOThreshold,
+        lowIOThreshold,
+      });
+
+      if (options.reportOnly) {
+        // Save report only
+        const outputDir = options.outputDir;
+        if (!fs.existsSync(outputDir)) {
+          fs.mkdirSync(outputDir, { recursive: true });
+        }
+        // Save report in environment-specific folder
+        const environment = baseConfig.environment || 'default';
+        const envOutputDir = path.join(outputDir, environment);
+        fs.mkdirSync(envOutputDir, { recursive: true });
+        const reportPath = path.join(envOutputDir, '_io_analysis_report.json');
+        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
+        console.log('━'.repeat(80));
+        console.log(`\n✅ Analysis report saved: ${reportPath}`);
+        console.log('\n💡 To generate config files, run without --report-only flag\n');
+      } else {
+        // Generate config files
+        const configGenerator = new ConfigGenerator(baseConfig, {
+          maxTablesPerJob,
+          groupByDomain: options.groupByDomain,
+        });
+
+        const generatedConfigs = await configGenerator.generateAllConfigs(tables, options.outputDir);
+
+        // Save analysis report with config references
+        configGenerator.saveAnalysisReport(report, options.outputDir);
+
+        // Display summary
+        configGenerator.displaySummary(options.outputDir);
+      }
+    } catch (error) {
+      console.error('❌ Error:', error);
+      if (error instanceof Error) {
+        console.error(error.stack);
+      }
       process.exit(1);
     }
   });

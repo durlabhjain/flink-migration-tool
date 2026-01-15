@@ -8,6 +8,13 @@ database:
   password: "${SQL_PASSWORD}"
   encrypt: true
 
+# StarRocks connection with environment variables
+starRocks:
+  feHost: "${STARROCKS_FE_HOST}"
+  database: "${STARROCKS_DATABASE}"
+  username: "${STARROCKS_USERNAME}"
+  password: "${STARROCKS_PASSWORD}"
+
 schema: "sales"
 jobName: "sales_customers_pipeline"  # Different job name, same schema
 

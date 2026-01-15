@@ -1,0 +1,89 @@
+# ============================================================================
+# Base Configuration Template for Auto-Config Generation
+# ============================================================================
+#
+# This is a template file. Copy this file and update with your credentials:
+#   cp configs/base_config_template.yaml configs/base_config.yaml
+#
+# Then edit base_config.yaml with your actual database and StarRocks settings.
+#
+# ============================================================================
+
+# SQL Server Database Configuration
+database:
+  server: "localhost"        # Your SQL Server host (e.g., "localhost", "192.168.1.100")
+  database: "YourDatabase"   # Your database name
+  user: "your_user"          # SQL Server username
+  password: "your_password"  # SQL Server password
+  port: 1433                 # SQL Server port (default: 1433)
+  encrypt: false             # Set to false for local SQL Server, true for Azure SQL
+
+# StarRocks Configuration (optional - if omitted, placeholders will be used)
+starRocks:
+  feHost: "localhost"          # StarRocks FE host (e.g., "192.168.5.235")
+  database: "your_db"          # Target StarRocks database
+  username: "root"             # StarRocks username
+  password: ""                 # StarRocks password
+  jdbcPort: 9030               # JDBC port (default: 9030)
+  loadPort: 8030               # HTTP load port (default: 8030)
+
+# Schema to process
+schema: "dbo"                  # Your schema name (e.g., "dbo", "sales", "inventory")
+
+# Optional: job name for organizing output
+jobName: "data_sync"           # Job name for organizing generated files
+
+# Auto-discover tables with patterns
+global:
+  tables:
+    # Include specific table patterns (optional)
+    include:
+      - "^Order.*"             # Tables starting with "Order"
+
+    # Exclude unwanted tables
+    exclude:
+      - ".*_Archive$"          # Archive tables
+      - ".*_Backup$"           # Backup tables
+      - "^tmp_"                # Temp tables
+      - "^sys"                 # System tables
+
+  # Exclude unwanted columns globally (applied to ALL generated configs)
+  columns:
+    exclude:
+      - "Version"            # Exclude "Version" column (timestamp/rowversion)
+
+# Output paths
+output:
+  flinkPath: "./output/flink"
+  starRocksPath: "./output/starrocks"
+  checksumPath: "./output/checksums"
+
+# ============================================================================
+# Usage Examples
+# ============================================================================
+#
+# 1. Analyze I/O and generate configs:
+#    npm run analyze-io -- --base-config configs/base_config.yaml
+#
+# 2. Generate report only (no config files):
+#    npm run analyze-io -- --base-config configs/base_config.yaml --report-only
+#
+# 3. Custom thresholds:
+#    npm run analyze-io -- --base-config configs/base_config.yaml \
+#      --high-threshold 50000 --low-threshold 5000
+#
+# 4. Generate all pipelines from auto-generated configs:
+#    npm run generate-all -- --config-dir configs/auto-generated
+#
+# ============================================================================
+# Advanced Options (Optional)
+# ============================================================================
+#
+# I/O Analysis Thresholds (uncomment to customize):
+#
+# ioAnalysis:
+#   thresholds:
+#     high: 100000      # Tables with >100k I/O ops = HIGH (individual config)
+#     low: 10000        # Tables with <10k I/O ops = LOW (bundled config)
+#
+# ============================================================================

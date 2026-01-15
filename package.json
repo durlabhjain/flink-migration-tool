@@ -11,6 +11,7 @@
     "start": "ts-node src/index.ts",
     "generate": "ts-node src/index.ts generate",
     "generate-all": "ts-node src/index.ts generate-all",
+    "analyze-io": "ts-node src/index.ts analyze-io",
     "dev": "ts-node-dev --respawn src/index.ts",
     "prepare": "npm run build"
   },
