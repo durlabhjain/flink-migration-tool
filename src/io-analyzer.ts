@@ -73,7 +73,7 @@ interface DatabaseConfig {
 export class IOAnalyzer {
   private connection: sql.ConnectionPool | null = null;
 
-  constructor(private dbConfig: DatabaseConfig) {}
+  constructor(private dbConfig: DatabaseConfig) { }
 
   async connect(): Promise<void> {
     const sqlConfig: MSSQLConfig = {
@@ -208,7 +208,7 @@ export class IOAnalyzer {
             readWriteRatio,
             rowCount: rowCountMap.get(tableName) || 0,
             lastActivity,
-            category: this.categorizeTable(totalIO, options), // Use totalIO for categorization
+            category: this.categorizeTable(totalWrites, options), // Use totalIO for categorization
           };
         } else {
           // Table has no I/O statistics - treat as low I/O
@@ -467,12 +467,12 @@ export class IOAnalyzer {
    * Categorize table based on I/O operations
    */
   private categorizeTable(
-    totalIOOps: number,
+    totalWrites: number,
     options: IOAnalysisOptions
   ): 'high' | 'medium' | 'low' {
-    if (totalIOOps >= options.highIOThreshold) {
+    if (totalWrites >= options.highIOThreshold) {
       return 'high';
-    } else if (totalIOOps >= options.lowIOThreshold) {
+    } else if (totalWrites >= options.lowIOThreshold) {
       return 'medium';
     } else {
       return 'low';
@@ -536,7 +536,7 @@ export class IOAnalyzer {
     if (highIO.length > 0) {
       console.log('🔥 High I/O Tables (Individual Configs):');
       highIO.forEach(t => {
-        console.log(`   • ${t.table.padEnd(25)} ${this.formatNumber(t.totalIOOperations).padStart(12)} ops`);
+        console.log(`   • ${t.table.padEnd(25)} ${this.formatNumber(t.totalUpdates).padStart(12)} ops`);
       });
       console.log();
     }

@@ -37,17 +37,17 @@ const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   { sqlServer: 'smallint', flink: 'SMALLINT', starRocks: 'SMALLINT' },
   { sqlServer: 'int', flink: 'INT', starRocks: 'INT' },
   { sqlServer: 'bigint', flink: 'BIGINT', starRocks: 'BIGINT' },
-  
+
   // Decimal types
   { sqlServer: 'decimal', flink: 'DECIMAL({precision},{scale})', starRocks: 'DECIMAL({precision},{scale})' },
   { sqlServer: 'numeric', flink: 'DECIMAL({precision},{scale})', starRocks: 'DECIMAL({precision},{scale})' },
   { sqlServer: 'money', flink: 'DECIMAL(19,4)', starRocks: 'DECIMAL(19,4)' },
   { sqlServer: 'smallmoney', flink: 'DECIMAL(10,4)', starRocks: 'DECIMAL(10,4)' },
-  
+
   // Floating point
   { sqlServer: 'float', flink: 'DOUBLE', starRocks: 'DOUBLE' },
   { sqlServer: 'real', flink: 'FLOAT', starRocks: 'FLOAT' },
-  
+
   // String types
   { sqlServer: 'char', flink: 'CHAR({maxLength})', starRocks: 'CHAR({maxLength})' },
   { sqlServer: 'varchar', flink: 'VARCHAR({maxLength})', starRocks: 'VARCHAR({maxLength})' },
@@ -55,7 +55,7 @@ const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   { sqlServer: 'nvarchar', flink: 'VARCHAR({maxLength})', starRocks: 'VARCHAR({maxLength})' },
   { sqlServer: 'text', flink: 'STRING', starRocks: 'STRING' },
   { sqlServer: 'ntext', flink: 'STRING', starRocks: 'STRING' },
-  
+
   // Date/Time types
   { sqlServer: 'date', flink: 'DATE', starRocks: 'DATE' },
   { sqlServer: 'datetime', flink: 'TIMESTAMP(3)', starRocks: 'DATETIME' },
@@ -63,15 +63,15 @@ const DEFAULT_TYPE_MAPPINGS: TypeMapping[] = [
   { sqlServer: 'smalldatetime', flink: 'TIMESTAMP(0)', starRocks: 'DATETIME' },
   { sqlServer: 'time', flink: 'TIME({scale})', starRocks: 'TIME' },
   { sqlServer: 'datetimeoffset', flink: 'TIMESTAMP_LTZ({scale})', starRocks: 'DATETIME' },
-  
+
   // Boolean
   { sqlServer: 'bit', flink: 'BOOLEAN', starRocks: 'BOOLEAN' },
-  
+
   // Binary types
   { sqlServer: 'binary', flink: 'BINARY({maxLength})', starRocks: 'BINARY' },
-  { sqlServer: 'varbinary', flink: 'VARBINARY({maxLength})', starRocks: 'VARBINARY' },
-  { sqlServer: 'image', flink: 'BYTES', starRocks: 'VARBINARY' },
-  
+  { sqlServer: 'varbinary', flink: 'VARCHAR({maxLength_times_2})', starRocks: 'VARBINARY' },
+  { sqlServer: 'image', flink: 'VARCHAR(2000)', starRocks: 'VARBINARY' },
+
   // Other types
   { sqlServer: 'uniqueidentifier', flink: 'VARCHAR(36)', starRocks: 'VARCHAR(36)' },
   { sqlServer: 'xml', flink: 'STRING', starRocks: 'STRING' },
@@ -87,7 +87,7 @@ const VARCHAR_MAX_LENGTH = 65535;
 class SchemaExtractor {
   private connection: sql.ConnectionPool | null = null;
 
-  constructor(private config: DatabaseConfig) {}
+  constructor(private config: DatabaseConfig) { }
 
   async connect(): Promise<void> {
     const sqlConfig: MSSQLConfig = {
@@ -279,7 +279,7 @@ class FlinkScriptGenerator {
     private databaseConfig: DatabaseConfig,
     private starRocksConfig?: StarRocksConfig,
     private flinkConfig?: FlinkConfig
-  ) {}
+  ) { }
 
   generate(tableSchema: TableSchema, override?: TableOverride): string {
     let columns = [...tableSchema.columns];
@@ -357,8 +357,9 @@ ${columnDefs.join(',\n')}${pk}
   'table-name' = 'dbo.${tableSchema.table}',
 
   -- CDC Configuration
-  'scan.incremental.snapshot.enabled' = 'false',
-  'scan.incremental.snapshot.chunk.size' = '8096',
+  'scan.incremental.snapshot.enabled' = 'true',
+  'scan.incremental.snapshot.chunk.size' = '10000',
+  ${primaryKey.length > 0 ? `'scan.incremental.snapshot.chunk.key-column' = '${primaryKey[0]}',` : ''}
   'scan.snapshot.fetch.size' = '1024',
   'connect.timeout' = '30s',
   'connect.max-retries' = '3',
@@ -593,7 +594,7 @@ SET 'table.exec.source.idle-timeout' = '30s';
 }
 
 class StarRocksScriptGenerator {
-  constructor(private typeMapper: TypeMapper, private databaseName: string) {}
+  constructor(private typeMapper: TypeMapper, private databaseName: string) { }
 
   /**
    * Extract computed column information for ALTER statement generation
@@ -793,6 +794,18 @@ class MigrationScriptGenerator {
   }
 
   /**
+   * Get environment-aware output paths
+   */
+  private getEnvironmentOutputPaths() {
+    const environment = this.config.environment || 'default';
+    return {
+      flinkPath: path.join(this.config.output.flinkPath, environment),
+      starRocksPath: path.join(this.config.output.starRocksPath, environment),
+      checksumPath: path.join(this.config.output.checksumPath, environment)
+    };
+  }
+
+  /**
    * Reset the global computed columns collection
    */
   static resetGlobalComputedColumns(): void {
@@ -802,7 +815,7 @@ class MigrationScriptGenerator {
   /**
    * Generate a single MSSQL ALTER statements file for all computed columns
    */
-  static generateGlobalComputedColumnsFile(outputDir: string): string | null {
+  static generateGlobalComputedColumnsFile(outputDir: string, environment?: string): string | null {
     if (MigrationScriptGenerator.globalComputedColumns.length === 0) {
       return null;
     }
@@ -849,68 +862,16 @@ class MigrationScriptGenerator {
       }
     }
 
-    const computedColumnsFile = path.join(outputDir, 'all_computed_columns_mssql.sql');
+    // Create environment-specific directory if needed
+    const envOutputDir = environment ? path.join(outputDir, environment) : outputDir;
+    fs.mkdirSync(envOutputDir, { recursive: true });
+
+    const computedColumnsFile = path.join(envOutputDir, 'all_computed_columns_mssql.sql');
     fs.writeFileSync(computedColumnsFile, computedColumnsScript);
 
     return computedColumnsFile;
   }
 
-  /**
-   * Generate DROP COLUMN statements for all computed columns (for cleanup/rollback)
-   */
-  static generateDropComputedColumnsFile(outputDir: string): string | null {
-    if (MigrationScriptGenerator.globalComputedColumns.length === 0) {
-      return null;
-    }
-
-    let dropScript = `-- ============================================================================\n`;
-    dropScript += `-- StarRocks/MySQL DROP Statements for All Computed Columns\n`;
-    dropScript += `-- ============================================================================\n`;
-    dropScript += `-- IMPORTANT: This script drops all computed columns\n`;
-    dropScript += `-- Use this for cleanup or before recreating computed columns\n`;
-    dropScript += `-- Execute this script in StarRocks SQL Client or MySQL\n`;
-    dropScript += `--\n`;
-    dropScript += `-- Generated: ${new Date().toISOString()}\n`;
-    dropScript += `-- Total Computed Columns: ${MigrationScriptGenerator.globalComputedColumns.length}\n`;
-    dropScript += `-- ============================================================================\n\n`;
-
-    // Group by table
-    const columnsByTable = new Map<string, typeof MigrationScriptGenerator.globalComputedColumns>();
-    for (const col of MigrationScriptGenerator.globalComputedColumns) {
-      const tableKey = `${col.schema}.${col.table}`;
-      if (!columnsByTable.has(tableKey)) {
-        columnsByTable.set(tableKey, []);
-      }
-      columnsByTable.get(tableKey)!.push(col);
-    }
-
-    // Get database name from first column (all should be in same DB)
-    const firstCol = MigrationScriptGenerator.globalComputedColumns[0];
-    const databaseName = firstCol.jobName.split('_').slice(-1)[0].replace(/-/g, '_');
-
-    // Generate DROP statements for each table
-    for (const [tableKey, columns] of columnsByTable) {
-      const [_schema, tableName] = tableKey.split('.');
-
-      dropScript += `-- ============================================================================\n`;
-      dropScript += `-- Table: ${tableKey}\n`;
-      dropScript += `-- Computed Columns: ${columns.length}\n`;
-      dropScript += `-- Jobs: ${[...new Set(columns.map(c => c.jobName))].join(', ')}\n`;
-      dropScript += `-- ============================================================================\n\n`;
-
-      for (const col of columns) {
-        dropScript += `-- Column: ${col.column.name}\n`;
-        dropScript += `-- Type: ${col.column.sqlServerType}\n`;
-        dropScript += `ALTER TABLE \`${databaseName}\`.\`${tableName}\`\n`;
-        dropScript += `DROP COLUMN \`${col.column.name}\`;\n\n`;
-      }
-    }
-
-    const dropFile = path.join(outputDir, 'drop_computed_columns_starrocks.sql');
-    fs.writeFileSync(dropFile, dropScript);
-
-    return dropFile;
-  }
 
   // Removed generateConvertedComputedColumnsFile method - MySQL conversion no longer needed
 
@@ -1086,14 +1047,15 @@ class MigrationScriptGenerator {
 
     await this.extractor.disconnect();
 
-    // Write output files
-    fs.mkdirSync(this.config.output.flinkPath, { recursive: true });
-    fs.mkdirSync(this.config.output.starRocksPath, { recursive: true });
-    fs.mkdirSync(this.config.output.checksumPath, { recursive: true });
+    // Write output files (environment-aware)
+    const envPaths = this.getEnvironmentOutputPaths();
+    fs.mkdirSync(envPaths.flinkPath, { recursive: true });
+    fs.mkdirSync(envPaths.starRocksPath, { recursive: true });
+    fs.mkdirSync(envPaths.checksumPath, { recursive: true });
 
-    const flinkFile = path.join(this.config.output.flinkPath, `${jobName}.sql`);
-    const starRocksFile = path.join(this.config.output.starRocksPath, `${jobName}_starrocks.sql`);
-    const checksumFile = path.join(this.config.output.checksumPath, `${jobName}_checksums.json`);
+    const flinkFile = path.join(envPaths.flinkPath, `${jobName}.sql`);
+    const starRocksFile = path.join(envPaths.starRocksPath, `${jobName}_starrocks.sql`);
+    const checksumFile = path.join(envPaths.checksumPath, `${jobName}_checksums.json`);
 
     fs.writeFileSync(flinkFile, pipelineScript);
     fs.writeFileSync(starRocksFile, starRocksScript);
@@ -1140,7 +1102,7 @@ program
       await generator.generate(options.detectChanges);
 
       // Generate single file with computed columns
-      const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(config.output.starRocksPath);
+      const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(config.output.starRocksPath, config.environment);
 
       if (computedColumnsFile) {
         console.log(`\n📝 Computed Columns Summary:`);
@@ -1173,8 +1135,9 @@ program
       // Reset global computed columns collection
       MigrationScriptGenerator.resetGlobalComputedColumns();
 
-      // Determine output directory from first config file
+      // Determine output directory and environment from first config file
       let starRocksOutputDir: string | null = null;
+      let environment: string = 'default';
 
       for (const configFile of configFiles) {
         console.log(`\n${'='.repeat(80)}`);
@@ -1186,9 +1149,10 @@ program
           ? JSON.parse(configContent)
           : yaml.load(configContent) as SchemaConfig;
 
-        // Store the output directory from the first config
+        // Store the output directory from the first config (with environment awareness)
         if (!starRocksOutputDir) {
-          starRocksOutputDir = config.output.starRocksPath;
+          environment = config.environment || 'default';
+          starRocksOutputDir = path.join(config.output.starRocksPath, environment);
         }
 
         const generator = new MigrationScriptGenerator(config);
@@ -1197,13 +1161,13 @@ program
 
       // Generate single file with all computed columns
       if (starRocksOutputDir) {
-        const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(starRocksOutputDir);
-        const dropColumnsFile = MigrationScriptGenerator.generateDropComputedColumnsFile(starRocksOutputDir);
+        // Pass the base output directory and environment separately for proper organization
+        const baseOutputDir = path.dirname(starRocksOutputDir);
+        const computedColumnsFile = MigrationScriptGenerator.generateGlobalComputedColumnsFile(baseOutputDir, environment);
 
         if (computedColumnsFile) {
           console.log(`\n\n📝 Computed Columns Summary:`);
           console.log(`   All Computed Columns (MSSQL): ${computedColumnsFile}`);
-          console.log(`   DROP Columns (StarRocks): ${dropColumnsFile}`);
           console.log(`   Total Computed Columns: ${MigrationScriptGenerator['globalComputedColumns'].length}`);
         }
       }
@@ -1220,8 +1184,8 @@ program
   .description('Analyze table I/O patterns and auto-generate optimized config files')
   .requiredOption('-b, --base-config <path>', 'Path to base configuration file (YAML or JSON)')
   .option('-o, --output-dir <path>', 'Output directory for generated configs', './configs')
-  .option('--high-threshold <number>', 'I/O operations threshold for high category', '100000')
-  .option('--low-threshold <number>', 'I/O operations threshold for low category', '10000')
+  .option('--high-threshold <number>', 'I/O operations threshold for high category')
+  .option('--low-threshold <number>', 'I/O operations threshold for low category')
   .option('--max-tables-per-job <number>', 'Maximum tables per job config', '10')
   .option('--no-group-by-domain', 'Disable domain-based table grouping')
   .option('--report-only', 'Generate analysis report only (no config files)', false)
@@ -1232,7 +1196,7 @@ program
       if (!fs.existsSync(baseConfigPath)) {
         console.error(`❌ Base config file not found: ${baseConfigPath}`);
         console.log('\n💡 Create a base config file with your database credentials:');
-        console.log('   See: configs/base_config_template.yaml');
+        console.log('   See: configs/base_config.yaml for configuration format');
         process.exit(1);
       }
 
@@ -1242,8 +1206,23 @@ program
         : JSON.parse(baseConfigContent);
 
       // Parse thresholds
-      const highIOThreshold = parseInt(options.highThreshold);
-      const lowIOThreshold = parseInt(options.lowThreshold);
+      // Parse thresholds with priority: CLI args > Config file > Defaults
+      let highIOThreshold = options.highThreshold ? parseInt(options.highThreshold) : undefined;
+      let lowIOThreshold = options.lowThreshold ? parseInt(options.lowThreshold) : undefined;
+
+      // Use config values if CLI args are missing
+      if (highIOThreshold === undefined && baseConfig.ioAnalysis?.thresholds?.high) {
+        highIOThreshold = baseConfig.ioAnalysis.thresholds.high;
+      }
+
+      if (lowIOThreshold === undefined && baseConfig.ioAnalysis?.thresholds?.low) {
+        lowIOThreshold = baseConfig.ioAnalysis.thresholds.low;
+      }
+
+      // Apply defaults if still undefined
+      highIOThreshold = highIOThreshold || 100000;
+      lowIOThreshold = lowIOThreshold || 10000;
+
       const maxTablesPerJob = parseInt(options.maxTablesPerJob);
 
       if (isNaN(highIOThreshold) || isNaN(lowIOThreshold) || isNaN(maxTablesPerJob)) {
@@ -1292,7 +1271,11 @@ program
         if (!fs.existsSync(outputDir)) {
           fs.mkdirSync(outputDir, { recursive: true });
         }
-        const reportPath = path.join(outputDir, '_io_analysis_report.json');
+        // Save report in environment-specific folder
+        const environment = baseConfig.environment || 'default';
+        const envOutputDir = path.join(outputDir, environment);
+        fs.mkdirSync(envOutputDir, { recursive: true });
+        const reportPath = path.join(envOutputDir, '_io_analysis_report.json');
         fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
         console.log('━'.repeat(80));
         console.log(`\n✅ Analysis report saved: ${reportPath}`);

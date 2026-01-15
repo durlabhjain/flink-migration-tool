@@ -26,6 +26,7 @@ interface SchemaConfig {
     loadPort?: number;
   };
   schema: string;
+  environment?: string;
   jobName?: string;
   global?: {
     tables?: {
@@ -54,6 +55,7 @@ interface GeneratedConfig {
   jobName: string;
   category: 'high' | 'medium' | 'low' | 'bundle';
   tables: string[];
+  estimatedUpdateOps: number;
   estimatedIOOps: number;
 }
 
@@ -67,7 +69,7 @@ export class ConfigGenerator {
   constructor(
     private baseConfig: Partial<SchemaConfig>,
     private options: ConfigGenerationOptions
-  ) {}
+  ) { }
 
   /**
    * Generate all configuration files based on I/O analysis
@@ -78,27 +80,31 @@ export class ConfigGenerator {
   ): Promise<GeneratedConfig[]> {
     this.generatedConfigs = [];
 
-    // Ensure output directory exists
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
+    // Create environment-specific output directory
+    const environment = this.baseConfig.environment || 'default';
+    const envOutputDir = path.join(outputDir, environment);
+
+    // Ensure environment output directory exists
+    if (!fs.existsSync(envOutputDir)) {
+      fs.mkdirSync(envOutputDir, { recursive: true });
     }
 
     // Generate configs for high I/O tables (individual)
     const highIOTables = tables.filter(t => t.category === 'high');
     for (const table of highIOTables) {
-      await this.generateHighIOConfig(table, outputDir);
+      await this.generateHighIOConfig(table, envOutputDir);
     }
 
     // Generate single bundle config for all medium I/O tables
     const mediumIOTables = tables.filter(t => t.category === 'medium');
     if (mediumIOTables.length > 0) {
-      await this.generateMediumIOBundleConfig(mediumIOTables, outputDir);
+      await this.generateMediumIOBundleConfig(mediumIOTables, envOutputDir);
     }
 
     // Generate single bundle config for all low I/O tables
     const lowIOTables = tables.filter(t => t.category === 'low');
     if (lowIOTables.length > 0) {
-      await this.generateLowIOBundleConfig(lowIOTables, outputDir);
+      await this.generateLowIOBundleConfig(lowIOTables, envOutputDir);
     }
 
     return this.generatedConfigs;
@@ -145,6 +151,7 @@ export class ConfigGenerator {
       jobName,
       category: 'high',
       tables: [tableName],
+      estimatedUpdateOps: table.totalUpdates,
       estimatedIOOps: table.totalIOOperations,
     });
   }
@@ -190,6 +197,7 @@ export class ConfigGenerator {
       jobName,
       category: 'bundle',
       tables: tables.map(t => t.table),
+      estimatedUpdateOps: tables.reduce((sum, t) => sum + t.totalUpdates, 0),
       estimatedIOOps: totalIOOps,
     });
   }
@@ -235,6 +243,7 @@ export class ConfigGenerator {
       jobName,
       category: 'bundle',
       tables: tables.map(t => t.table),
+      estimatedUpdateOps: tables.reduce((sum, t) => sum + t.totalUpdates, 0),
       estimatedIOOps: totalIOOps,
     });
   }
@@ -335,6 +344,7 @@ export class ConfigGenerator {
         encrypt: false,
       },
       starRocks: this.baseConfig.starRocks,
+      environment: this.baseConfig.environment || 'default',
       output: this.baseConfig.output || {
         flinkPath: './output/flink',
         starRocksPath: './output/starrocks',
@@ -407,7 +417,10 @@ export class ConfigGenerator {
       }
     }
 
-    const reportPath = path.join(outputDir, '_io_analysis_report.json');
+    // Save report in environment-specific folder
+    const environment = this.baseConfig.environment || 'default';
+    const envOutputDir = path.join(outputDir, environment);
+    const reportPath = path.join(envOutputDir, '_io_analysis_report.json');
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8');
   }
 
@@ -424,7 +437,7 @@ export class ConfigGenerator {
     if (highConfigs.length > 0) {
       console.log('🔥 High I/O Tables (Individual Configs):');
       highConfigs.forEach(c => {
-        const opsStr = c.estimatedIOOps.toLocaleString().padStart(12);
+        const opsStr = c.estimatedUpdateOps.toLocaleString().padStart(12);
         console.log(`   • ${c.tables[0].padEnd(30)} ${opsStr} ops  →  ${c.file}`);
       });
       console.log();
@@ -434,7 +447,7 @@ export class ConfigGenerator {
       console.log('📦 Bundled Configs:');
       bundleConfigs.forEach(c => {
         const category = c.file.includes('medium') ? 'MEDIUM I/O' : 'LOW I/O';
-        const opsStr = c.estimatedIOOps.toLocaleString().padStart(12);
+        const opsStr = c.estimatedUpdateOps.toLocaleString().padStart(12);
         console.log(`   • ${category.padEnd(15)} ${c.tables.length.toString().padStart(3)} tables ${opsStr} ops  →  ${c.file}`);
       });
       console.log();
@@ -442,8 +455,10 @@ export class ConfigGenerator {
 
     console.log('━'.repeat(80));
     console.log();
-    console.log(`✅ Generated ${this.generatedConfigs.length} config files in: ${outputDir}`);
-    console.log(`✅ Analysis report saved: ${path.join(outputDir, '_io_analysis_report.json')}`);
+    const environment = this.baseConfig.environment || 'default';
+    const envOutputDir = path.join(outputDir, environment);
+    console.log(`✅ Generated ${this.generatedConfigs.length} config files in: ${envOutputDir}`);
+    console.log(`✅ Analysis report saved: ${path.join(envOutputDir, '_io_analysis_report.json')}`);
     console.log();
     console.log('💡 Next steps:');
     console.log('   1. Review generated configs in', outputDir);

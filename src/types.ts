@@ -57,15 +57,25 @@ export interface TableOverride {
   customMappings?: Record<string, { flink?: string; starRocks?: string }>;
 }
 
+
 export interface FlinkConfig {
   checkpointDir: string;  // Base checkpoint directory
   savepointDir: string;   // Base savepoint directory
 }
 
+export interface IOAnalysisConfig {
+  thresholds?: {
+    high?: number;
+    low?: number;
+  };
+}
+
+
 export interface SchemaConfig {
   database: DatabaseConfig;
   starRocks?: StarRocksConfig;  // Optional StarRocks connection config
   schema: string;  // Schema name for this config file
+  environment?: string;  // Environment name for folder organization (dev, prod, test, etc.)
   global?: GlobalConfig;  // Global include/exclude patterns
   tableOverrides?: TableOverride[];  // Per-table overrides
   typeMappings?: TypeMapping[];
@@ -76,6 +86,7 @@ export interface SchemaConfig {
   };
   jobName?: string;  // Optional job name for multi-job organization
   flink?: FlinkConfig;  // Optional Flink checkpoint/savepoint configuration
+  ioAnalysis?: IOAnalysisConfig; // Optional I/O analysis configuration
 }
 
 export interface TableSchema {
