@@ -5,38 +5,43 @@ Get up and running with the SQL Server to Flink/StarRocks migration tool in 5 mi
 ## Step 1: Project Setup (2 minutes)
 
 ```bash
-# Create project directory
-mkdir flink-migration-tool && cd flink-migration-tool
-
-# Initialize npm project
-npm init -y
+# Clone or create project directory
+git clone https://github.com/durlabhjain/flink-migration-tool.git
+cd flink-migration-tool
 
 # Install dependencies
-npm install mssql js-yaml commander typescript glob @types/node @types/mssql @types/js-yaml ts-node
+npm install
 
-# Create directory structure
-mkdir -p src configs output/{flink,starrocks,checksums}
+# Create output directory structure
+mkdir -p output/{flink,starrocks,checksums}
 ```
 
-## Step 2: Add the Tool (1 minute)
+## Step 2: Verify Installation (1 minute)
 
-1. Copy the main TypeScript code to `src/index.ts`
-2. Copy `package.json` template and merge with your existing one
-3. Copy `tsconfig.json` to your project root
+Check that all components are ready:
+```bash
+# Verify TypeScript compilation
+npm run build
 
-Update your `package.json` scripts section:
-```json
-{
-  "scripts": {
-    "generate": "ts-node src/index.ts generate",
-    "generate-all": "ts-node src/index.ts generate-all"
-  }
-}
+# Check available commands
+npm run generate -- --help
+npm run generate-all -- --help
+npm run analyze-io -- --help
 ```
 
 ## Step 3: Create Schema Configuration (1 minute)
 
-Create `configs/sales_schema.yaml`:
+Use one of the example configurations or create your own:
+
+```bash
+# Copy and modify an example
+cp configs/examples/simple.yaml configs/my_config.yaml
+
+# Or create from base template
+cp configs/base_config_template.yaml configs/my_config.yaml
+```
+
+Example configuration (`configs/my_config.yaml`):
 
 ```yaml
 database:
@@ -47,11 +52,28 @@ database:
   port: 1433
   encrypt: false             # Set to false for local SQL Server
 
+# Optional: StarRocks connection (if omitted, placeholders will be used)
+starRocks:
+  feHost: "starrocks.example.com"
+  database: "analytics"
+  username: "root"
+  password: "starrocks_password"
+  jdbcPort: 9030
+  loadPort: 8030
+
 # Schema to process
-schema: "sales"              # Your schema name
+schema: "dbo"                # Your schema name
+
+# Optional: Environment for organizing outputs
+environment: "dev"           # Creates dev/ subdirectories
 
 # Optional: job name for organizing output
 jobName: "sales_sync"
+
+# Optional: Flink checkpoint configuration
+flink:
+  checkpointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints"
+  savepointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints"
 
 # Auto-discover tables with patterns
 global:
@@ -60,12 +82,13 @@ global:
     include:
       - "^Order.*"           # Tables starting with "Order"
       - "^Customer.*"        # Tables starting with "Customer"
-    
+
     # Exclude unwanted tables
     exclude:
       - ".*_Archive$"        # Archive tables
       - "^tmp_"              # Temp tables
-  
+      - "sysdiagrams"        # SQL Server diagrams
+
   # Exclude unwanted columns globally
   columns:
     exclude:
@@ -82,25 +105,34 @@ output:
 
 ```bash
 # Basic generation (auto-discovers tables based on patterns)
-npm run generate -- -c configs/sales_schema.yaml
+npm run generate -- -c configs/my_config.yaml
 
 # With change detection (on subsequent runs)
-npm run generate -- -c configs/sales_schema.yaml --detect-changes
+npm run generate -- -c configs/my_config.yaml --detect-changes
+
+# Generate from multiple config files
+npm run generate-all -- -d configs/examples
+
+# Auto-generate optimized configs based on I/O analysis
+npm run analyze-io -- -b configs/base_config.yaml -o configs/auto-generated
 ```
 
 ## Step 5: Review Output
 
-Check the generated files:
+Check the generated files (organized by environment if specified):
 
 ```bash
-# Flink CDC table definitions
-cat output/flink/sales_sync_flink.sql
+# Flink CDC pipeline (complete job with CDC sources, StarRocks sinks, and INSERT statements)
+cat output/flink/dev/sales_sync_YourDatabase.sql
 
 # StarRocks table definitions
-cat output/starrocks/sales_sync_starrocks.sql
+cat output/starrocks/dev/sales_sync_YourDatabase_starrocks.sql
+
+# Computed columns (MSSQL ALTER statements)
+cat output/starrocks/dev/all_computed_columns_mssql.sql
 
 # Schema checksums (for change detection)
-cat output/checksums/sales_sync_checksums.json
+cat output/checksums/dev/sales_sync_YourDatabase_checksums.json
 ```
 
 ## Common First-Time Issues
@@ -128,43 +160,64 @@ FROM INFORMATION_SCHEMA.TABLES;
 
 ## Next Steps
 
-### Add More Tables
+### Use I/O Analysis for Optimization
 
-```yaml
-tables:
-  - schema: "dbo"
-    table: "Users"
-  - schema: "dbo"
-    table: "Orders"
-  - schema: "sales"
-    table: "Transactions"
+```bash
+# Analyze table I/O patterns to auto-generate optimized configs
+npm run analyze-io -- -b configs/base_config.yaml -o configs/optimized
+
+# Generate report only (no config files)
+npm run analyze-io -- -b configs/base_config.yaml --report-only
 ```
 
-### Exclude Sensitive Columns
+### Override Specific Tables
+
+Use `tableOverrides` for fine-grained control:
 
 ```yaml
-tables:
-  - schema: "dbo"
-    table: "Users"
+tableOverrides:
+  - table: "Users"
     excludeColumns:
       - "Password"
       - "SSN"
-      - "InternalNotes"
-```
-
-### Custom Type Mappings
-
-```yaml
-tables:
-  - schema: "dbo"
-    table: "Products"
     customMappings:
       Metadata:
         flink: "STRING"
         starRocks: "JSON"
-      Price:
-        flink: "DECIMAL(10,2)"
-        starRocks: "DECIMAL(10,2)"
+```
+
+### Environment-Based Configuration
+
+Organize configurations by environment:
+
+```yaml
+# Development environment
+environment: "dev"
+database:
+  server: "dev-sql.example.com"
+
+# Production environment
+environment: "prod"
+database:
+  server: "prod-sql.example.com"
+```
+
+### Use Environment Variables
+
+```yaml
+database:
+  server: "${SQL_SERVER}"
+  database: "${SQL_DATABASE}"
+  user: "${SQL_USER}"
+  password: "${SQL_PASSWORD}"
+```
+
+Set environment variables:
+```bash
+export SQL_SERVER="localhost"
+export SQL_DATABASE="MyDatabase"
+export SQL_USER="sa"
+export SQL_PASSWORD="YourPassword123"
 ```
 
 ### Enable Change Detection
@@ -195,46 +248,53 @@ Changes for dbo.Users:
 
 ```bash
 # 1. Setup
+git clone https://github.com/durlabhjain/flink-migration-tool.git
+cd flink-migration-tool
 npm install
 
-# 2. Configure (edit config.yaml with your database details)
-vim config.yaml
+# 2. Configure (use example or create your own)
+cp configs/examples/simple.yaml configs/my_config.yaml
+# Edit configs/my_config.yaml with your database details
 
-# 3. Generate initial scripts
-npm run generate -- -c config.yaml
+# 3. Optional: Analyze I/O patterns for optimization
+npm run analyze-io -- -b configs/my_config.yaml -o configs/optimized
 
-# 4. Review generated DDL
-cat output/flink/flink_tables.sql
+# 4. Generate initial scripts
+npm run generate -- -c configs/my_config.yaml
 
-# 5. Apply to Flink (example using Flink SQL Client)
-# Update connection details in the generated SQL first!
-# flink-sql -f output/flink/flink_tables.sql
+# 5. Review generated files
+cat output/flink/dev/sales_sync_MyDatabase.sql
+cat output/starrocks/dev/sales_sync_MyDatabase_starrocks.sql
 
-# 6. Apply to StarRocks
-# mysql -h starrocks-host -P 9030 -u root < output/starrocks/starrocks_tables.sql
+# 6. Apply to StarRocks first
+mysql -h starrocks-host -P 9030 -u root < output/starrocks/dev/sales_sync_MyDatabase_starrocks.sql
 
-# 7. Commit baseline
+# 7. Apply to Flink (complete pipeline with CDC sources and sinks)
+./bin/sql-client.sh -f output/flink/dev/sales_sync_MyDatabase.sql
+
+# 8. Commit baseline for change detection
 git add output/checksums/
 git commit -m "Initial schema"
 
-# 8. Later: detect changes
-npm run generate -- -c config.yaml --detect-changes
+# 9. Later: detect changes
+npm run generate -- -c configs/my_config.yaml --detect-changes
 ```
 
 ## Production Checklist
 
 Before deploying to production:
 
-- [ ] Test with development database first
-- [ ] Review all generated DDL scripts
-- [ ] Update connection strings in Flink DDL (hostname, credentials)
-- [ ] Verify primary keys are correct
-- [ ] Check type mappings for your specific data
-- [ ] Test with a small subset of data
+- [ ] Test with development database first using I/O analysis
+- [ ] Review all generated DDL scripts (CDC sources, StarRocks sinks, computed columns)
+- [ ] Set up environment-based configurations (dev, staging, prod)
+- [ ] Configure Flink checkpoint/savepoint directories
 - [ ] Set up proper credential management (environment variables)
+- [ ] Verify primary keys and column filtering work correctly
+- [ ] Test StarRocks connection configuration
 - [ ] Configure appropriate StarRocks properties (replication_num, etc.)
-- [ ] Establish change detection workflow
-- [ ] Document your table configuration
+- [ ] Establish change detection workflow with git
+- [ ] Review computed column handling and ALTER statements
+- [ ] Test complete pipeline: SQL Server → Flink CDC → StarRocks
 
 ## Getting Help
 
@@ -243,72 +303,59 @@ Before deploying to production:
 3. **Review examples** in the documentation
 4. **Verify SQL Server connectivity** using `sqlcmd` or SSMS
 
+## Available Commands
+
+### Generate Scripts
+```bash
+# Generate from single config
+npm run generate -- -c configs/my_config.yaml
+
+# Generate with change detection
+npm run generate -- -c configs/my_config.yaml --detect-changes
+
+# Generate from multiple configs
+npm run generate-all -- -d configs/examples
+npm run generate-all -- -d configs/examples --detect-changes
+```
+
+### I/O Analysis & Auto-Configuration
+```bash
+# Analyze and generate optimized configs
+npm run analyze-io -- -b configs/base_config.yaml -o configs/generated
+
+# Custom thresholds
+npm run analyze-io -- -b configs/base_config.yaml --high-threshold 50000 --low-threshold 5000
+
+# Report only (no config generation)
+npm run analyze-io -- -b configs/base_config.yaml --report-only
+```
+
 ## Example Configurations
 
-### Local Development
-```yaml
-database:
-  server: "localhost"
-  database: "TestDB"
-  user: "sa"
-  password: "DevPassword123"
-  encrypt: false
+Check the `configs/examples/` directory for various configuration examples:
 
-tables:
-  - schema: "dbo"
-    table: "TestTable"
-
-output:
-  flinkPath: "./dev-output/flink"
-  starRocksPath: "./dev-output/starrocks"
-  checksumPath: "./dev-output/state"
-```
-
-### Production with Environment Variables
-```yaml
-database:
-  server: "${SQL_SERVER}"
-  database: "${SQL_DATABASE}"
-  user: "${SQL_USER}"
-  password: "${SQL_PASSWORD}"
-  encrypt: true
-
-tables:
-  - schema: "prod"
-    table: "Customers"
-    excludeColumns:
-      - "InternalNotes"
-  - schema: "prod"
-    table: "Orders"
-
-output:
-  flinkPath: "./prod-scripts/flink"
-  starRocksPath: "./prod-scripts/starrocks"
-  checksumPath: "./prod-scripts/state"
-```
-
-Set environment variables:
-```bash
-export SQL_SERVER="prod-sql.example.com"
-export SQL_DATABASE="ProductionDB"
-export SQL_USER="etl_user"
-export SQL_PASSWORD="secure_password"
-```
+- `simple.yaml` - Basic single-schema setup
+- `large_database.yaml` - Multi-job configuration for large databases
+- `sensitive_data.yaml` - Configuration with column exclusions
+- `multi_job_*.yaml` - Examples of job-specific configurations
 
 ## Tips for Success
 
-1. **Start small**: Begin with 1-2 tables, verify output, then add more
-2. **Version control**: Commit config and checksums to Git
-3. **Review DDL**: Always review generated SQL before applying
-4. **Test mappings**: Verify data type conversions with sample data
-5. **Automate**: Integrate into CI/CD for continuous schema sync
+1. **Start small**: Begin with 1-2 tables using simple.yaml, verify output, then scale
+2. **Use I/O analysis**: Let the tool auto-generate optimized configurations
+3. **Environment organization**: Use environment-based folder structure
+4. **Version control**: Commit configs and checksums to Git for change tracking
+5. **Review outputs**: Always review generated SQL (CDC sources, sinks, computed columns)
+6. **Test mappings**: Verify data type conversions with sample data
+7. **StarRocks first**: Create StarRocks tables before running Flink pipeline
 
-## What's Next?
+## Advanced Features
 
-- Set up automated schema checks in your CI/CD pipeline
-- Configure multiple environments (dev, staging, prod)
-- Customize type mappings for your specific use cases
-- Implement change notifications (email, Slack, etc.)
-- Create deployment scripts for Flink and StarRocks
+- **Environment support**: Organize configs by dev/staging/prod environments
+- **I/O analysis**: Auto-generate configs based on table usage patterns
+- **Computed columns**: Automatic handling with MSSQL ALTER statements
+- **Multi-job support**: Process large databases with multiple optimized jobs
+- **Change detection**: Track and report schema changes over time
+- **StarRocks integration**: Direct sink connector configuration
 
 Happy migrating! 🚀

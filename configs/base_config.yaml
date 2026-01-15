@@ -1,48 +1,87 @@
-# Base Configuration for I/O Analysis
-# Auto-generated configs will inherit these settings
+# ============================================================================
+# Base Configuration for SQL Server to StarRocks Migration Tool
+# ============================================================================
+#
+# This is the primary configuration file for the migration tool.
+# Auto-generated configs will inherit these settings.
+#
+# Usage:
+#   npm run analyze-io -- --base-config configs/base_config.yaml
+#   npm run generate-all -- --config-dir configs/auto-generated
+#
+# Environment Structure:
+#   configs/auto-generated/dev/     (if environment: "dev")
+#   output/flink/dev/               (Flink scripts)
+#   output/starrocks/dev/           (StarRocks scripts)
+#   output/checksums/dev/           (Schema checksums)
+#
+# ============================================================================
 
+# SQL Server Database Configuration
 database:
-  server: ""  # IP address used for I/O analysis
-  serverHostname: ""  # Optional: Hostname for Flink CDC (if different from server)
-  database: ""
-  user: ""
-  password: ""
+  server: "server-ip"  # IP address used for I/O analysis
+  serverHostname: "server-hostname"  # Optional: Hostname for Flink CDC (if different from server)
+  database: "mssql-db-name"
+  user: "mssql-db-username"
+  password: "mssql-db-password"
   port: 1433
   encrypt: false
 
 starRocks:
-  feHost: ""
-  database: ""
-  username: ""
-  password: ""
-  jdbcPort: 9030
-  loadPort: 8030
+  feHost: "starRocks-fe-hostname"        # StarRocks FE host
+  database: "starrocks-db-name"          # Target StarRocks database
+  username: "root"                       # StarRocks username
+  password: ""                           # StarRocks password
+  jdbcPort: 9030                         # JDBC port (default: 9030)
+  loadPort: 8030                         # HTTP load port (default: 8030)
 
-schema: "dbo"
-
-# Optional: job name for organizing output
-jobName: ""
-
-  # Flink checkpoint and savepoint configuration
+# Flink Configuration
 flink:
   checkpointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/checkpoints"
   savepointDir: "wasbs://flink@coolr0flink0starrocks.blob.core.windows.net/savepoints"
 
-# Global filters applied to ALL auto-generated configs
+# Schema Configuration
+schema: "dbo"                            # Source schema (e.g., "dbo", "sales", "inventory")
+
+# Environment Configuration (dev, prod, test, etc.)
+environment: "prod"                       # Environment name for folder organization
+
+# Optional: Base job name for organizing output files
+jobName: ""
+
+# Global Filters (Applied to ALL auto-generated configs)
 global:
-  # Exclude unwanted columns globally
+  # Table filters
+  tables:
+    # Include patterns (optional) - uncomment and modify as needed
+    # include:
+    #   - "^Order.*"                     # Tables starting with "Order"
+    #   - "^Customer.*"                  # Tables starting with "Customer"
+
+    # Exclude specific tables from I/O analysis and job generation
+    exclude:
+      - "TableName"
+      # Add more patterns as needed:
+      # - ".*_Archive$"                  # Archive tables
+      # - ".*_Backup$"                   # Backup tables
+      # - "^tmp_"                        # Temp tables
+
+  # Column filters (applied globally)
   columns:
     exclude:
-      - "Version"
+      - "Column1"                        # Exclude timestamp/rowversion columns
+      # Add more columns to exclude globally
 
-  # Exclude specific tables from I/O analysis and job generation
-  # These tables will not be included in any generated config files
-  tables:
-    exclude:
-      # - "Table Name 1"
-      # - "Table Name 2"
+# I/O Analysis Configuration (Optional - uncomment to customize thresholds)
+ioAnalysis:
+  thresholds:
+    high: 700000                       # Tables with >100k I/O ops = HIGH (individual config)
+    low: 35000                         # Tables with <10k I/O ops = LOW (bundled config)
+#                                        # Medium tables (10k-100k) = grouped bundles
 
+# Output Paths
+# Note: Environment folder (dev/prod/test) will be automatically added to these paths
 output:
-  flinkPath: "./output/flink"
-  starRocksPath: "./output/starrocks"
-  checksumPath: "./output/checksums"
+  flinkPath: "./output/flink"            # Flink CDC pipeline scripts -> ./output/flink/{environment}/
+  starRocksPath: "./output/starrocks"    # StarRocks DDL scripts -> ./output/starrocks/{environment}/
+  checksumPath: "./output/checksums"     # Schema checksums -> ./output/checksums/{environment}/
