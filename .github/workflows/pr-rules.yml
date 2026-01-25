@@ -1,0 +1,15 @@
+name: PR Rules
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  title-check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ ! "${{ github.event.pull_request.title }}" =~ (TASK|BUG|FEATURE)-[0-9]+ ]]; then
+            echo "❌ PR title must include ticket ID (JIRA-123)"
+            exit 1
+          fi

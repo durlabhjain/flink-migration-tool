@@ -1,0 +1,23 @@
+language: "typescript"
+
+reviews:
+  profile: "thorough"
+  request_changes_workflow: true   # ❌ blocks merge
+  high_level_summary: true
+  poem: false
+
+monorepo:
+  enabled: true
+
+paths:
+  include:
+    - "apps/**"
+    - "packages/**"
+
+checks:
+  react:
+    hooks_rules: true
+    performance: true
+    accessibility: true
+  complexity: true
+  dead_code: true
