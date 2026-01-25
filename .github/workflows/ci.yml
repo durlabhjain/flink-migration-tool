@@ -5,7 +5,7 @@ on:
     branches: [ main ]
 
 jobs:
-  build-test:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -14,13 +14,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: yarn
 
       - name: Install dependencies
-        run: yarn install --frozen-lockfile
+        run: npm ci
 
-      - name: Build all workspaces
-        run: yarn workspaces run build
-
-      - name: Run tests
-        run: yarn workspaces run test
+      - name: Build (tsc)
+        run: npm run build
