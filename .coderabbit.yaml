@@ -2,22 +2,16 @@ language: "typescript"
 
 reviews:
   profile: "thorough"
-  request_changes_workflow: true   # ❌ blocks merge
+  request_changes_workflow: true   # ❌ block merge on issues
   high_level_summary: true
   poem: false
 
+# ❗ This is NOT a monorepo
 monorepo:
-  enabled: true
+  enabled: false
 
 paths:
   include:
-    - "apps/**"
-    - "packages/**"
-
-checks:
-  react:
-    hooks_rules: true
-    performance: true
-    accessibility: true
-  complexity: true
-  dead_code: true
+    - "src/**"
+    - "configs/**"
+    - "*.ts"
