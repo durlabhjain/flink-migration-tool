@@ -5,12 +5,13 @@ Get up and running with the SQL Server to Flink/StarRocks migration tool in 5 mi
 ## Step 1: Project Setup (2 minutes)
 
 ```bash
-# Clone or create project directory
+# Clone the repository
 git clone https://github.com/durlabhjain/flink-migration-tool.git
 cd flink-migration-tool
 
-# Install dependencies
+# Install dependencies and build
 npm install
+npm run build
 
 # Create output directory structure
 mkdir -p output/{flink,starrocks,checksums}
@@ -18,12 +19,9 @@ mkdir -p output/{flink,starrocks,checksums}
 
 ## Step 2: Verify Installation (1 minute)
 
-Check that all components are ready:
+Check that all commands are working:
 ```bash
-# Verify TypeScript compilation
-npm run build
-
-# Check available commands
+# Check available commands (these should all show help text)
 npm run generate -- --help
 npm run generate-all -- --help
 npm run analyze-io -- --help
@@ -34,11 +32,19 @@ npm run analyze-io -- --help
 Use one of the example configurations or create your own:
 
 ```bash
-# Copy and modify an example
+# Option 1: Use example configuration (recommended for first try)
 cp configs/examples/simple.yaml configs/my_config.yaml
 
-# Or create from base template
-cp configs/base_config_template.yaml configs/my_config.yaml
+# Option 2: Create from base template
+cp configs/base_config.yaml configs/my_config.yaml
+```
+
+**Edit the config file with your database details:**
+```bash
+# Edit the copied file with your database connection info
+nano configs/my_config.yaml
+# OR
+code configs/my_config.yaml
 ```
 
 Example configuration (`configs/my_config.yaml`):
@@ -103,37 +109,45 @@ output:
 
 ## Step 4: Generate Scripts (1 minute)
 
+**For your first run, use the basic generation command:**
 ```bash
-# Basic generation (auto-discovers tables based on patterns)
+# Generate Flink and StarRocks scripts from your config
 npm run generate -- -c configs/my_config.yaml
+```
 
-# With change detection (on subsequent runs)
+**Alternative commands (use these later):**
+```bash
+# With change detection (after first run)
 npm run generate -- -c configs/my_config.yaml --detect-changes
 
-# Generate from multiple config files
+# Generate from multiple config files at once
 npm run generate-all -- -d configs/examples
 
-# Auto-generate optimized configs based on I/O analysis
-npm run analyze-io -- -b configs/base_config.yaml -o configs/auto-generated
+# Auto-generate optimized configs (advanced - requires existing database connection)
+npm run analyze-io -- -b configs/my_config.yaml -o configs/auto-generated
 ```
 
 ## Step 5: Review Output
 
-Check the generated files (organized by environment if specified):
+Check the generated files:
 
 ```bash
-# Flink CDC pipeline (complete job with CDC sources, StarRocks sinks, and INSERT statements)
-cat output/flink/dev/sales_sync_YourDatabase.sql
+# First, see what files were created
+ls -la output/flink/
+ls -la output/starrocks/
+ls -la output/checksums/
 
-# StarRocks table definitions
-cat output/starrocks/dev/sales_sync_YourDatabase_starrocks.sql
+# View the generated Flink CDC pipeline
+cat output/flink/*.sql
 
-# Computed columns (MSSQL ALTER statements)
-cat output/starrocks/dev/all_computed_columns_mssql.sql
+# View the StarRocks table definitions
+cat output/starrocks/*.sql
 
-# Schema checksums (for change detection)
-cat output/checksums/dev/sales_sync_YourDatabase_checksums.json
+# View checksums (for change detection)
+cat output/checksums/*.json
 ```
+
+**Note:** File names depend on your configuration. If you specified an environment (e.g., `environment: "dev"`), files will be in subdirectories like `output/flink/dev/`.
 
 ## Common First-Time Issues
 
@@ -251,32 +265,31 @@ Changes for dbo.Users:
 git clone https://github.com/durlabhjain/flink-migration-tool.git
 cd flink-migration-tool
 npm install
+npm run build
 
-# 2. Configure (use example or create your own)
+# 2. Create configuration
 cp configs/examples/simple.yaml configs/my_config.yaml
-# Edit configs/my_config.yaml with your database details
+# Edit configs/my_config.yaml with your database connection details
 
-# 3. Optional: Analyze I/O patterns for optimization
-npm run analyze-io -- -b configs/my_config.yaml -o configs/optimized
-
-# 4. Generate initial scripts
+# 3. Generate scripts
 npm run generate -- -c configs/my_config.yaml
 
-# 5. Review generated files
-cat output/flink/dev/sales_sync_MyDatabase.sql
-cat output/starrocks/dev/sales_sync_MyDatabase_starrocks.sql
+# 4. Check what was generated
+ls -la output/flink/
+ls -la output/starrocks/
 
-# 6. Apply to StarRocks first
-mysql -h starrocks-host -P 9030 -u root < output/starrocks/dev/sales_sync_MyDatabase_starrocks.sql
+# 5. View the generated SQL (file names will vary based on your config)
+cat output/flink/*.sql
+cat output/starrocks/*.sql
 
-# 7. Apply to Flink (complete pipeline with CDC sources and sinks)
-./bin/sql-client.sh -f output/flink/dev/sales_sync_MyDatabase.sql
+# 6. Apply to your systems (examples - adjust hostnames/credentials)
+# First apply StarRocks table definitions:
+mysql -h your-starrocks-host -P 9030 -u root < output/starrocks/*.sql
 
-# 8. Commit baseline for change detection
-git add output/checksums/
-git commit -m "Initial schema"
+# Then apply Flink CDC pipeline:
+# Upload the Flink SQL file to your Flink cluster or use sql-client
 
-# 9. Later: detect changes
+# 7. For change detection on subsequent runs
 npm run generate -- -c configs/my_config.yaml --detect-changes
 ```
 
@@ -305,29 +318,30 @@ Before deploying to production:
 
 ## Available Commands
 
-### Generate Scripts
+### Main Commands
+
+**Basic script generation:**
 ```bash
-# Generate from single config
 npm run generate -- -c configs/my_config.yaml
-
-# Generate with change detection
-npm run generate -- -c configs/my_config.yaml --detect-changes
-
-# Generate from multiple configs
-npm run generate-all -- -d configs/examples
-npm run generate-all -- -d configs/examples --detect-changes
 ```
 
-### I/O Analysis & Auto-Configuration
+**With change detection (after first run):**
 ```bash
-# Analyze and generate optimized configs
-npm run analyze-io -- -b configs/base_config.yaml -o configs/generated
+npm run generate -- -c configs/my_config.yaml --detect-changes
+```
 
-# Custom thresholds
-npm run analyze-io -- -b configs/base_config.yaml --high-threshold 50000 --low-threshold 5000
+**Multiple configs at once:**
+```bash
+npm run generate-all -- -d configs/examples
+```
 
-# Report only (no config generation)
-npm run analyze-io -- -b configs/base_config.yaml --report-only
+**I/O analysis (advanced):**
+```bash
+# Generate optimized configs based on table usage
+npm run analyze-io -- -b configs/my_config.yaml -o configs/generated
+
+# Just show analysis report
+npm run analyze-io -- -b configs/my_config.yaml --report-only
 ```
 
 ## Example Configurations
